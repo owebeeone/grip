@@ -8,6 +8,9 @@ import gc # For example usage
 import copy # Import the copy module
 from abc import ABC, abstractmethod # For abstract base class
 
+# --- Global Verbosity Flag ---
+VERBOSE = False # Set to True for detailed debug prints
+
 # --- Node Kind Enum ---
 
 class DGraphNodeKind(Enum):
@@ -33,39 +36,57 @@ class DGraphNodeBase(ABC):
 
 class DGraphNodeConstraints(ABC):
     """Abstract base class for constraints on DGraph nodes.
-    This is a capability modifier for nodes in the.
-    
-    These methods should not be called to make changes outside of the graph or 
-    link in copyable objects. This should be used solely for checking constraints
-    and doing bookkeeping functions on the graph.
+    An instance specific to a node type is provided by the DGraphNodeKey.
+    Methods should raise ConstraintViolationError (or a subclass) if a
+    constraint is violated.
     """
 
     @abstractmethod
-    def disconnect_nodes_check(self, this_node: 'DGraphNode', target: 'DGraphNode'):
-        """Called by DGraph.disconnect_nodes() to check if the target is valid before 
-        disconnecting on either side.
-        """
-        pass
-    
-    @abstractmethod
-    def disconnect_nodes_post(self, this_node: 'DGraphNode', target: 'DGraphNode'):
-        """Called by DGraph.disconnect_nodes() after the nodes have been disconnected."""
+    def check_can_connect_to(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Check if 'source_node' (of the type this constraint belongs to)
+        is allowed to connect TO 'target_node'."""
         pass
 
     @abstractmethod
-    def connect_nodes_check(self, this_node: 'DGraphNode', source: 'DGraphNode'):
-        """Called by DGraph.connect_nodes() to check if the source is valid before 
-        connecting on either side.
-        """
+    def check_can_receive_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Check if 'target_node' (of the type this constraint belongs to)
+        is allowed to receive a connection FROM 'source_node'."""
         pass
 
     @abstractmethod
-    def connect_nodes_post(self, this_node: 'DGraphNode', source: 'DGraphNode'):
-        """Called by DGraph.connect_nodes() after the nodes have been connected."""
+    def post_connect_to(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Called on source_node's constraints after a successful connection TO target_node."""
         pass
 
-    def __deepcopy__(self, memo: Dict[int, Any]) -> DGraphNodeConstraints:
-        """Constraints are immutable so just return self."""
+    @abstractmethod
+    def post_receive_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Called on target_node's constraints after a successful connection FROM source_node."""
+        pass
+
+    @abstractmethod
+    def check_can_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Check if 'source_node' (of the type this constraint belongs to)
+        is allowed to disconnect FROM 'target_node'."""
+        pass
+
+    @abstractmethod
+    def check_can_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Check if 'target_node' (of the type this constraint belongs to)
+        is allowed to have its connection FROM 'source_node' removed."""
+        pass
+
+    @abstractmethod
+    def post_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Called on source_node's constraints after successfully disconnecting FROM target_node."""
+        pass
+
+    @abstractmethod
+    def post_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'):
+        """Called on target_node's constraints after successfully removing the connection FROM source_node."""
+        pass
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> 'DGraphNodeConstraints':
+        """Constraints are typically stateless singletons, so just return self."""
         return self
     
 
@@ -426,23 +447,122 @@ class DGraph:
         return True
 
     def connect_nodes(self, source_id: int, target_id: int):
-        """Creates a directed edge from source node to target node."""
+        """Creates a directed edge from source node to target node, checking constraints."""
         source_node = self.nodes.get(source_id)
         target_node = self.nodes.get(target_id)
 
-        if source_node and target_node and source_id != target_id:
-            source_node._add_forward_link(target_id)
-            target_node._add_back_link(source_id)
-        # Add warnings if nodes not found?
+        if not (source_node and target_node and source_id != target_id):
+            if VERBOSE:
+                print(f"Warning: connect_nodes validation failed for {source_id} -> {target_id} (nodes not found or self-loop)")
+            return # Or raise appropriate error
+
+        # --- Check if already connected ---
+        if target_id in source_node.forward_links:
+            if VERBOSE:
+                print(f"Info: connect_nodes skipped for {source_id} -> {target_id} (already connected)")
+            return # Idempotent success
+
+        # --- Get Keys and Constraints (only if not already connected) ---
+        source_key = source_node.get_key()
+        target_key = target_node.get_key()
+
+        if not source_key or not target_key:
+            # Should not happen if nodes have keys, but handle defensively
+            raise ValueError(f"Cannot connect nodes: Missing key for source ({source_id}) or target ({target_id}).")
+
+        # Get constraints from keys
+        try:
+            source_constraints = source_key.constraints
+            target_constraints = target_key.constraints
+        except AttributeError as e:
+             raise NotImplementedError(f"Node key type {type(source_key).__name__} or {type(target_key).__name__} does not implement the 'constraints' property.") from e
+
+
+        # --- Check Constraints ---
+        # Raises ConstraintViolationError on failure
+        try:
+            # Check from the source's perspective
+            source_constraints.check_can_connect_to(source_node, target_node)
+            # Check from the target's perspective
+            target_constraints.check_can_receive_connection_from(source_node, target_node)
+        except Exception as e: # Catch ConstraintViolationError or others defined in constraints
+            if VERBOSE:
+                 print(f"Constraint check failed for {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name}): {e}")
+            raise # Re-raise the exception to signal failure
+
+        # --- Constraints Passed: Perform Connection ---
+        if VERBOSE:
+             print(f"Connecting {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name})")
+        source_node._add_forward_link(target_id)
+        target_node._add_back_link(source_id)
+
+        # --- Post-Connection Hooks ---
+        # These should generally not raise errors, but could log warnings
+        try:
+            source_constraints.post_connect_to(source_node, target_node)
+            target_constraints.post_receive_connection_from(source_node, target_node)
+        except Exception as e:
+            if VERBOSE:
+                print(f"Warning: Post-connection hook failed for {source_id}->{target_id}: {e}")
+
 
     def disconnect_nodes(self, source_id: int, target_id: int):
-        """Removes a directed edge from source node to target node."""
+        """Removes a directed edge, checking constraints before and calling hooks after."""
         source_node = self.nodes.get(source_id)
         target_node = self.nodes.get(target_id)
 
-        if source_node and target_node:
-            source_node._remove_forward_link(target_id)
-            target_node._remove_back_link(source_id)
+        if not (source_node and target_node):
+            if VERBOSE:
+                print(f"Warning: disconnect_nodes validation failed for {source_id} -> {target_id} (nodes not found)")
+            return # Or raise
+
+        # --- Check if the link actually exists before proceeding ---
+        if target_id not in source_node.forward_links:
+            if VERBOSE:
+                print(f"Info: disconnect_nodes skipped for {source_id} -> {target_id} (link does not exist)")
+            return # Idempotent success - No link to remove
+
+        # --- Get Keys and Constraints (only if link exists) ---
+        source_key = source_node.get_key()
+        target_key = target_node.get_key()
+
+        if not source_key or not target_key:
+            raise ValueError(f"Cannot disconnect nodes: Missing key for source ({source_id}) or target ({target_id}).")
+
+        # Get constraints from keys
+        try:
+            source_constraints = source_key.constraints
+            target_constraints = target_key.constraints
+        except AttributeError as e:
+             raise NotImplementedError(f"Node key type {type(source_key).__name__} or {type(target_key).__name__} does not implement the 'constraints' property.") from e
+
+
+        # --- Check Constraints ---
+        # Raises ConstraintViolationError or similar on failure
+        try:
+            # Check from the source's perspective
+            source_constraints.check_can_disconnect_from(source_node, target_node)
+            # Check from the target's perspective
+            target_constraints.check_can_remove_connection_from(source_node, target_node)
+        except Exception as e:
+            if VERBOSE:
+                 print(f"Disconnection constraint check failed for {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name}): {e}")
+            raise # Re-raise the exception to signal failure
+
+        # --- Constraints Passed: Perform Disconnection ---
+        if VERBOSE:
+            print(f"Disconnecting {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name})")
+        source_node._remove_forward_link(target_id)
+        target_node._remove_back_link(source_id)
+
+        # --- Post-Disconnection Hooks ---
+        try:
+            source_constraints.post_disconnect_from(source_node, target_node)
+            target_constraints.post_remove_connection_from(source_node, target_node)
+        except Exception as e:
+            if VERBOSE:
+                print(f"Warning: Post-disconnection hook failed for {source_id}->{target_id}: {e}")
+
 
     def has_cycle(self, subgraph_ids: Optional[Set[int]] = None) -> bool:
         """
@@ -608,174 +728,14 @@ class DGraphNodeKey(ABC): # Make it an Abstract Base Class
         """Returns the kind of node this key represents."""
         pass
     
-    def __deepcopy__(self, memo: Dict[int, Any]) -> DGraphNodeKey:
-        # No copying allowed for keys.
+    @property
+    @abstractmethod
+    def constraints(self) -> DGraphNodeConstraints:
+        """Returns the constraint implementation specific to this node type."""
+        pass
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> 'DGraphNodeKey':
+        # Keys are immutable and potentially shared, return self.
         return self
     
-
-# --- Specific Key Subclasses for Grip Graph ---
-
-@dataclass(frozen=True, order=True)
-class GroupKey(DGraphNodeKey):
-    """Key representing a GROUP node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.GROUP
-
-@dataclass(frozen=True, order=True)
-class ProducerKey(DGraphNodeKey):
-    """Key representing a PRODUCER node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.PRODUCER
-
-@dataclass(frozen=True, order=True)
-class ConsumerKey(DGraphNodeKey):
-    """Key representing a CONSUMER node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.CONSUMER
-    
-@dataclass(frozen=True, order=True)
-class QueryKey(DGraphNodeKey):
-    """Key representing a CONSUMER node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.QUERY
-
-
-# --- Example Usage ---
-if __name__ == '__main__':
-    # Explicitly create the group
-    shared_group = DGraphGroup()
-
-    # Create graph instance, passing the shared group
-    graph = DGraph(group=shared_group)
-    wrap = DGraphWrap(graph) # Create wrapper
-
-    # Create specific key types
-    key_g1 = GroupKey("Group 1 Data")
-    key_p1 = ProducerKey("Producer 1 Data")
-    key_c1 = ConsumerKey("Consumer 1 Data")
-    key_c2 = ConsumerKey("Consumer 2 Data")
-    key_p2 = ProducerKey("Producer 2 Data") # New key
-
-    # Add nodes using the wrapper's get_or_add_node (kind is derived from key)
-    node_g1 = wrap.get_or_add(key_g1)
-    node_p1 = wrap.get_or_add(key_p1)
-    node_c1 = wrap.get_or_add(key_c1)
-    node_c2 = wrap.get_or_add(key_c2)
-    # Keyless nodes would need a different method if required:
-    # node_lonely = graph.add_keyless_node(kind=DGraphNodeKind.CONSUMER)
-
-    print(f"Initial dirty nodes: {graph.dirty_node_ids}")
-    graph.clear_dirty()
-
-    # Connect nodes using the wrapper
-    print("\nConnecting nodes using wrapper...")
-    wrap.connect_nodes(key_c1, key_p1)
-    wrap.connect_nodes(key_c2, key_p1)
-    wrap.connect_nodes(key_p1, key_g1)
-
-    # --- Test auto-add feature of get_node_by_key ---
-    print("\nTesting get_node_by_key auto-add...")
-    # Register P2 key in the group, but don't add node to graph yet
-    key_p2_id = shared_group.register_key(key_p2)
-    print(f"Node for P2 exists before get? {graph.get_node_by_key(key_p2)}") # Should be None initially
-    # Now call get_node_by_key - it should add the node
-    node_p2 = graph.get_node_by_key(key_p2)
-    print(f"Node for P2 after get: {node_p2}")
-    assert node_p2 is not None, "get_node_by_key failed to auto-add node" # Add assertion
-    if node_p2: # Check added correctly
-         print(f"Node P2 correctly added to graph.nodes? {node_p2.internal_id in graph.nodes}")
-         print(f"Node P2 correctly added to graph._key_id_to_node_id? {graph._key_id_to_node_id.get(key_p2_id) == node_p2.internal_id}")
-    # --- End Test ---
-
-
-    print("\nGraph after connections and auto-add:")
-    for node_id in list(graph.nodes.keys()): print(graph.get_node(node_id))
-    print(f"\nDirty nodes after connections: {graph.dirty_node_ids}")
-    print(f"Graph has cycle? {graph.has_cycle()}")
-
-    # Introduce cycle
-    print("\nIntroducing cycle G1 -> C1...")
-    wrap.connect_nodes(key_g1, key_c1)
-    print(f"Graph has cycle? {graph.has_cycle()}")
-
-    # Remove cycle
-    print("\nRemoving cycle G1 -> C1...")
-    wrap.disconnect_nodes(key_g1, key_c1)
-    print(f"Graph has cycle? {graph.has_cycle()}")
-
-    # --- Test deepcopy ---
-    print("\n--- Testing deepcopy ---")
-    graph_copy = copy.deepcopy(graph)
-
-    print("\n--- Copied Graph ---")
-    for node_id in list(graph_copy.nodes.keys()): print(graph_copy.get_node(node_id))
-    print(f"Copied Group object ID:   {id(graph_copy.group)}")
-    copied_node_c1 = graph_copy.get_node(node_c1.internal_id)
-    print(f"Copied Node C1 graph ref ID:   {id(copied_node_c1.graph)}")
-
-
-    # Verify group is shared (same object)
-    print(f"\nGroup shared? (graph.group is graph_copy.group): {graph.group is graph_copy.group}")
-
-    # Verify nodes dictionary is a different object (deep copied)
-    print(f"Nodes dict shared? (graph.nodes is graph_copy.nodes): {graph.nodes is graph_copy.nodes}")
-
-    # Verify a node object is a different object
-    copied_node_c1_from_orig_graph = graph.nodes[node_c1.internal_id]
-    copied_node_c1_from_copy_graph = graph_copy.nodes[node_c1.internal_id]
-    print(f"Node C1 shared? (graph.nodes[{node_c1.internal_id}] is graph_copy.nodes[{node_c1.internal_id}]): {copied_node_c1_from_orig_graph is copied_node_c1_from_copy_graph}")
-
-
-    # Verify the copied node points back to the copied graph
-    print(f"Copied Node C1 points to copied graph? (copied_node_c1.graph is graph_copy): {copied_node_c1.graph is graph_copy}")
-
-    # Verify modifying copy doesn't affect original
-    print("\nModifying copy (disconnect C2 -> P1)...")
-    wrap_copy = DGraphWrap(graph_copy)
-    wrap_copy.disconnect_nodes(key_c2, key_p1)
-
-    print("Original graph node P1:")
-    print(graph.get_node(node_p1.internal_id))
-    print("Copied graph node P1:")
-    print(graph_copy.get_node(node_p1.internal_id))
-
-
-    # --- Test key reaping (on original graph) ---
-    print("\n--- Testing key reaping (on original graph) ---")
-    node_id_c2 = node_c2.internal_id # Get ID before key ref is deleted
-    print(f"Node C2 before reap: {graph.get_node(node_id_c2)}")
-    key_id_c2 = graph.group.get_id_from_key(key_c2) # Get key ID
-    print(f"Key object for C2 exists: {graph.group.get_key_from_id(key_id_c2) is not None}")
-
-    # Simulate key_c2 being garbage collected
-    print("Deleting external reference to key_c2 and running GC...")
-    key_c2_ref = key_c2 # Keep ref temporarily if needed for other things
-    del key_c2
-    gc.collect() # Suggest garbage collection
-
-    # Verify weak ref is likely dead (may depend on GC timing)
-    print(f"Key object for C2 exists after GC?: {graph.group.get_key_from_id(key_id_c2) is not None}")
-
-    # Run reap_graph_keys
-    print("Running graph.group.reap_graph_keys(graph)...")
-    reaped_ids = graph.group.reap_graph_keys(graph) # Use the graph's shared group
-    print(f"Reaped key IDs: {reaped_ids}")
-    print(f"Node C2 after reap: {graph.get_node(node_id_c2)}") # Should be None
-    print(f"Dirty nodes after reap: {graph.dirty_node_ids}") # Neighbors of C2 should be dirty
-    print(f"Key C2 still in strong map?: {key_c2_ref in graph.group._key_to_internal_id}") # Should be False if key_c2_ref is the original key
-
-    print("\nOriginal Graph after reaping C2:")
-    for node_id in list(graph.nodes.keys()): print(graph.get_node(node_id))
-
-    # Clean up temporary ref
-    del key_c2_ref
-    gc.collect()
 

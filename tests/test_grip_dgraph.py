@@ -4,38 +4,84 @@ import time
 import copy
 import math
 import gc
-from typing import Dict, Set, Optional, List, Tuple
+from typing import Dict, Set, Optional, List, Tuple, Any
 import weakref
-
-# Assume the graph implementation is in a file named dgraph_impl.py
-# If running directly, you might need to include the class definitions here instead.
-try:
-    from grip.grip_graph4 import (
+from grip.grip_dgraph import (
         DGraphNodeKey,
-        GroupKey,
-        ProducerKey,
-        ConsumerKey,
-        QueryKey,
         DGraphNodeKind,
         DGraphGroup,
         DGraphNode,
         DGraph,
         DGraphWrap,
+        DGraphNodeConstraints,
     )
-except ImportError:
-    # Fallback if running as a single file - copy the class definitions
-    # from the dgraph_structure immersive here.
-    # This part is omitted for brevity, assuming import works.
-    print(
-        "WARNING: Could not import graph classes. Define them in this file or ensure dgraph_impl.py is accessible."
-    )
-    # Add class definitions from dgraph_structure here if needed...
-    # ... (DGraphNodeKey, GroupKey, etc.) ...
-    # ... (DGraphGroup) ...
-    # ... (DGraphNode) ...
-    # ... (DGraph) ...
-    # ... (DGraphWrap) ...
-    raise
+
+from dataclasses import dataclass, field
+
+# --- Define No-Op Constraints for Testing --- #
+class NoOpConstraints(DGraphNodeConstraints):
+    """A constraint implementation that does nothing and allows everything."""
+    def check_can_connect_to(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def check_can_receive_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def post_connect_to(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def post_receive_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def check_can_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def check_can_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def post_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def post_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+
+_no_op_constraints = NoOpConstraints()
+
+# --- Specific Key Subclasses for Grip Graph ---
+
+@dataclass(frozen=True, order=True)
+class GroupKey(DGraphNodeKey):
+    """Key representing a GROUP node."""
+    key_data: Any # Typically a string or int ID
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.GROUP
+    @property
+    def constraints(self) -> DGraphNodeConstraints:
+        return _no_op_constraints # Use No-Op for basic DGraph tests
+
+@dataclass(frozen=True, order=True)
+class ProducerKey(DGraphNodeKey):
+    """Key representing a PRODUCER node."""
+    key_data: Any # Typically a tuple (group_id, producer_id)
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.PRODUCER
+    @property
+    def constraints(self) -> DGraphNodeConstraints:
+        return _no_op_constraints # Use No-Op for basic DGraph tests
+
+@dataclass(frozen=True, order=True)
+class ConsumerKey(DGraphNodeKey):
+    """Key representing a CONSUMER node."""
+    key_data: Any # Typically a tuple (group_id, consumer_id)
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.CONSUMER
+    @property
+    def constraints(self) -> DGraphNodeConstraints:
+        return _no_op_constraints # Use No-Op for basic DGraph tests
+    
+@dataclass(frozen=True, order=True)
+class QueryKey(DGraphNodeKey):
+    """Key representing a QUERY node."""
+    key_data: Any # Typically the query string or ID
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.QUERY
+    @property
+    def constraints(self) -> DGraphNodeConstraints:
+        return _no_op_constraints # Use No-Op for basic DGraph tests
+
 
 
 # --- Helper Function for Creating Random Graphs ---
