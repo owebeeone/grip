@@ -4,7 +4,7 @@ import time
 import copy
 import math
 import gc
-from typing import Dict, Set, Optional, List, Tuple, Any
+from typing import Dict, Set, Optional, List, Tuple, Any, Iterable
 import weakref
 from grip.grip_dgraph import (
         DGraphNodeKey,
@@ -14,7 +14,8 @@ from grip.grip_dgraph import (
         DGraph,
         DGraphWrap,
         DGraphNodeConstraints,
-        ApplicationKeyBase
+        ApplicationKeyBase,
+        BFSTraversalVisitor
     )
 
 from dataclasses import dataclass, field
@@ -200,6 +201,25 @@ def create_random_graph(
 
     graph.clear_dirty()  # Start clean for tests
     return wrap, node_keys
+
+
+# --- Test Visitor Implementation ---
+class SimpleBFSVisitor(BFSTraversalVisitor):
+    def __init__(self, forward: bool = True, kind_filter: Optional[Set[DGraphNodeKind]] = None, stop_at_kind: Optional[DGraphNodeKind] = None):
+        self.visited_order: List[int] = []
+        self.neighbor_generator = 'get_forward_neighbors' if forward else 'get_backward_neighbors'
+        self.kind_filter = kind_filter
+        self.stop_at_kind = stop_at_kind
+
+    def visit(self, node: "DGraphNode") -> bool:
+        self.visited_order.append(node.internal_id)
+        if self.stop_at_kind is not None and node.kind == self.stop_at_kind:
+            return False # Stop exploring from this node
+        return True # Continue exploring
+
+    def get_neighbors(self, node: "DGraphNode") -> Iterable["DGraphNode"]:
+        neighbor_func = getattr(node, self.neighbor_generator)
+        return neighbor_func(kinds=self.kind_filter)
 
 
 # --- Unit Test Class ---
@@ -568,6 +588,146 @@ class TestDGraph(unittest.TestCase):
             self.assertEqual(len(graph.nodes), len(graph_copy.nodes))
 
         print("--------------------------")
+
+    def test_neighbor_filtering(self):
+        """Test get_forward_neighbors and get_backward_neighbors with kind filtering."""
+        seed = 109
+        random.seed(seed)
+        group = DGraphGroup()
+        graph = DGraph(group=group)
+        wrap = DGraphWrap(graph)
+
+        # Create nodes of different kinds
+        key_c1 = ConsumerKey(TestAppKey("CF1"))
+        key_c2 = ConsumerKey(TestAppKey("CF2"))
+        key_p1 = ProducerKey(TestAppKey("PF1"))
+        key_g1 = GroupKey(TestAppKey("GF1"))
+
+        node_c1 = wrap.get_or_add(key_c1)
+        node_c2 = wrap.get_or_add(key_c2)
+        node_p1 = wrap.get_or_add(key_p1)
+        node_g1 = wrap.get_or_add(key_g1)
+
+        # Connect C1 -> P1, C1 -> G1, P1 -> C2
+        wrap.connect_nodes(key_c1, key_p1)
+        wrap.connect_nodes(key_c1, key_g1)
+        wrap.connect_nodes(key_p1, key_c2)
+
+        # --- Test Forward Neighbors --- 
+        fwd_all = list(node_c1.get_forward_neighbors())
+        self.assertCountEqual([n.internal_id for n in fwd_all], [node_p1.internal_id, node_g1.internal_id])
+
+        fwd_producers = list(node_c1.get_forward_neighbors(kinds={DGraphNodeKind.PRODUCER}))
+        self.assertCountEqual([n.internal_id for n in fwd_producers], [node_p1.internal_id])
+
+        fwd_groups = list(node_c1.get_forward_neighbors(kinds={DGraphNodeKind.GROUP}))
+        self.assertCountEqual([n.internal_id for n in fwd_groups], [node_g1.internal_id])
+
+        fwd_consumers = list(node_c1.get_forward_neighbors(kinds={DGraphNodeKind.CONSUMER}))
+        self.assertEqual(len(fwd_consumers), 0)
+
+        fwd_multi = list(node_c1.get_forward_neighbors(kinds={DGraphNodeKind.PRODUCER, DGraphNodeKind.GROUP}))
+        self.assertCountEqual([n.internal_id for n in fwd_multi], [node_p1.internal_id, node_g1.internal_id])
+
+        # --- Test Backward Neighbors --- 
+        bck_all = list(node_p1.get_backward_neighbors())
+        self.assertCountEqual([n.internal_id for n in bck_all], [node_c1.internal_id])
+
+        bck_consumers = list(node_p1.get_backward_neighbors(kinds={DGraphNodeKind.CONSUMER}))
+        self.assertCountEqual([n.internal_id for n in bck_consumers], [node_c1.internal_id])
+
+        bck_producers = list(node_p1.get_backward_neighbors(kinds={DGraphNodeKind.PRODUCER}))
+        self.assertEqual(len(bck_producers), 0)
+
+    def test_bfs_traversal(self):
+        """Test the bfs_traverse method with the visitor."""
+        seed = 110
+        random.seed(seed)
+        group = DGraphGroup()
+        graph = DGraph(group=group)
+        wrap = DGraphWrap(graph)
+
+        # Create a small chain/graph: C1 -> P1 -> G1 -> G2, C1 -> G2
+        key_c1 = ConsumerKey(TestAppKey("CB1"))
+        key_p1 = ProducerKey(TestAppKey("PB1"))
+        key_g1 = GroupKey(TestAppKey("GB1"))
+        key_g2 = GroupKey(TestAppKey("GB2"))
+        key_c2 = ConsumerKey(TestAppKey("CB2_unreachable")) # Unconnected node
+
+        node_c1 = wrap.get_or_add(key_c1)
+        node_p1 = wrap.get_or_add(key_p1)
+        node_g1 = wrap.get_or_add(key_g1)
+        node_g2 = wrap.get_or_add(key_g2)
+        node_c2 = wrap.get_or_add(key_c2)
+
+        wrap.connect_nodes(key_c1, key_p1)
+        wrap.connect_nodes(key_p1, key_g1)
+        wrap.connect_nodes(key_g1, key_g2)
+        wrap.connect_nodes(key_c1, key_g2)
+
+        # 1. Simple forward traversal from C1
+        visitor_fwd = SimpleBFSVisitor(forward=True)
+        graph.bfs_traverse([node_c1], visitor_fwd)
+        # Expected order: C1 visited first. Then P1 and G2 (level 1) in some order. Then G1 (level 2) from P1.
+        # Exact order depends on deque and neighbor iteration order.
+        expected_nodes_fwd = {node_c1.internal_id, node_p1.internal_id, node_g1.internal_id, node_g2.internal_id}
+        self.assertEqual(set(visitor_fwd.visited_order), expected_nodes_fwd)
+        self.assertEqual(visitor_fwd.visited_order[0], node_c1.internal_id)
+
+        # 2. Backward traversal from G2
+        visitor_bwd = SimpleBFSVisitor(forward=False)
+        graph.bfs_traverse([node_g2], visitor_bwd)
+        # Expected: G2, then G1 and C1, then P1
+        expected_nodes_bwd = {node_g2.internal_id, node_g1.internal_id, node_c1.internal_id, node_p1.internal_id}
+        self.assertEqual(set(visitor_bwd.visited_order), expected_nodes_bwd)
+        self.assertEqual(visitor_bwd.visited_order[0], node_g2.internal_id)
+
+        # 3. Forward traversal with kind filter (only Groups)
+        visitor_fwd_grp = SimpleBFSVisitor(forward=True, kind_filter={DGraphNodeKind.GROUP})
+        graph.bfs_traverse([node_c1], visitor_fwd_grp)
+        # Expected: C1 (visited, but neighbors filtered), G2 (from C1, kind matches), G1 (visited but no GROUP neighbors)
+        # Corrected Expected: C1 (visited), G2 (neighbor of C1), G1 (neighbor of P1, but P1 not visited) -> NO, G1 is neighbor of P1. P1 is neighbor of C1. P1 visited. G1 is neighbor of P1.
+        # Let's rethink: Start C1. Visit C1. Neighbors P1, G2.
+        # Queue: [P1, G2]. Pop P1. Visit P1. Get neighbors (G1). Kind filter allows G1. Queue: [G2, G1].
+        # Pop G2. Visit G2. Get neighbors (none fwd). Queue: [G1].
+        # Pop G1. Visit G1. Get neighbors (G2). G2 already visited. Queue empty.
+        # Visited order should contain C1, P1, G2, G1. But visitor only *yields* groups.
+        # The visitor controls neighbors, not visit filter. So all reachable are visited.
+        # Let's test filtering *within* the visitor's get_neighbors:
+        # Visitor yields neighbors based on its filter.
+        # Start C1. Visit C1. Get neighbors (P1, G2). Filter allows G2. Queue: [G2].
+        # Pop G2. Visit G2. Get neighbors (none fwd). Queue empty.
+        # Expected order: [C1, G2]
+        expected_nodes_fwd_grp = {node_c1.internal_id, node_g2.internal_id}
+        self.assertEqual(set(visitor_fwd_grp.visited_order), expected_nodes_fwd_grp)
+        self.assertListEqual(visitor_fwd_grp.visited_order, [node_c1.internal_id, node_g2.internal_id]) # Order matters here
+
+        # 4. Forward traversal stopping at a kind (stop at Group)
+        visitor_fwd_stop = SimpleBFSVisitor(forward=True, stop_at_kind=DGraphNodeKind.GROUP)
+        graph.bfs_traverse([node_c1], visitor_fwd_stop)
+        # Expected: Visit C1 (continue). Neighbors P1, G2.
+        # Queue: [P1, G2]. Pop P1. Visit P1 (continue). Neighbors G1.
+        # Queue: [G2, G1]. Pop G2. Visit G2 (STOP). No neighbors added.
+        # Queue: [G1]. Pop G1. Visit G1 (STOP). No neighbors added.
+        # Order: C1, P1, G2, G1
+        expected_nodes_fwd_stop = {node_c1.internal_id, node_p1.internal_id, node_g1.internal_id, node_g2.internal_id}
+        self.assertEqual(set(visitor_fwd_stop.visited_order), expected_nodes_fwd_stop)
+        # Check order more loosely - C1 first, others present
+        self.assertEqual(visitor_fwd_stop.visited_order[0], node_c1.internal_id)
+
+        # 5. Starting from multiple nodes
+        visitor_multi = SimpleBFSVisitor(forward=True)
+        graph.bfs_traverse([node_c1, node_g1], visitor_multi)
+        # Expected: C1, G1 added. Pop C1. Visit C1. Neighbors P1, G2. Queue:[G1, P1, G2].
+        # Pop G1. Visit G1. Neighbors G2. G2 already added. Queue: [P1, G2].
+        # Pop P1. Visit P1. Neighbors G1. G1 already visited. Queue: [G2].
+        # Pop G2. Visit G2. No neighbors. Queue empty.
+        expected_nodes_multi = {node_c1.internal_id, node_p1.internal_id, node_g1.internal_id, node_g2.internal_id}
+        self.assertEqual(set(visitor_multi.visited_order), expected_nodes_multi)
+        # First two visited are the start nodes (order depends on input iterable and queue init)
+        self.assertIn(visitor_multi.visited_order[0], {node_c1.internal_id, node_g1.internal_id})
+        self.assertIn(visitor_multi.visited_order[1], {node_c1.internal_id, node_g1.internal_id})
+        self.assertNotEqual(visitor_multi.visited_order[0], visitor_multi.visited_order[1])
 
 
 # --- Test Runner ---

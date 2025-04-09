@@ -38,9 +38,39 @@ class DGraphNodeKind(Enum):
     QUERY = auto()
 
 
-class DGraphNodeConstraintsData(ABC):
-    """Abstract base class for data used to implement constraints on DGraph nodes."""
+# --- BFS Visitor Interface ---
+class BFSTraversalVisitor(ABC):
+    """Interface for customizing BFS traversal logic in DGraph.bfs_traverse."""
 
+    @abstractmethod
+    def visit(self, node: "DGraphNode") -> bool:
+        """Called when a node is visited during BFS.
+
+        Args:
+            node: The DGraphNode being visited.
+
+        Returns:
+            bool: True to continue exploring neighbors of this node,
+                  False to stop exploring from this node (but continue BFS overall).
+        """
+        pass
+
+    @abstractmethod
+    def get_neighbors(self, node: "DGraphNode") -> Iterable["DGraphNode"]:
+        """Called after visit() returns True to get the next nodes to explore.
+
+        Args:
+            node: The DGraphNode from which to get neighbors.
+
+        Returns:
+            Iterable[DGraphNode]: An iterable of neighbor nodes to potentially add to the BFS queue.
+                                 The implementation determines direction and filtering.
+        """
+        pass
+
+
+# --- Constraints Interfaces ---
+class DGraphNodeConstraintsData(ABC):
     pass
 
 
@@ -356,6 +386,26 @@ class DGraphNode(DGraphNodeBase):
     # Note: No __deepcopy__ needed here if DGraph.__deepcopy__ handles memoization correctly before copying nodes.
     # deepcopy will call __init__ on the copied nodes, and the graph reference
     # should point to the new graph instance found in the memo dictionary.
+
+    def get_neighbors_by_link(self, link_attr: str, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
+        """Helper to get neighbors from forward or backward links, optionally filtered by kind."""
+        link_ids: Set[int] = getattr(self, link_attr, set())
+        if not link_ids:
+            return
+
+        for neighbor_id in link_ids:
+            neighbor_node = self.graph.get_node(neighbor_id)
+            if neighbor_node:
+                if kinds is None or neighbor_node.kind in kinds:
+                    yield neighbor_node
+
+    def get_forward_neighbors(self, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
+        """Returns an iterable of forward neighbor nodes, optionally filtered by kind."""
+        yield from self.get_neighbors_by_link('forward_links', kinds)
+
+    def get_backward_neighbors(self, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
+        """Returns an iterable of backward neighbor nodes, optionally filtered by kind."""
+        yield from self.get_neighbors_by_link('back_links', kinds)
 
 
 # --- Directed Graph Definition ---
@@ -713,6 +763,49 @@ class DGraph:
 
         # Cycle exists if not all nodes in the valid subgraph were visited
         return visited_count != valid_nodes_in_subgraph
+
+    def bfs_traverse(self, start_nodes: Iterable[DGraphNode], visitor: BFSTraversalVisitor):
+        """Performs a Breadth-First Search traversal starting from given nodes,
+           using a visitor object to control behavior.
+
+        Args:
+            start_nodes: An iterable of DGraphNode instances to start the BFS from.
+            visitor: An object implementing the BFSTraversalVisitor interface.
+        """
+        if not start_nodes:
+            return
+
+        queue = deque()
+        visited: Set[int] = set()
+
+        # Initialize queue and visited set with valid start nodes
+        for start_node in start_nodes:
+            if start_node and start_node.internal_id in self.nodes and start_node.internal_id not in visited:
+                visited.add(start_node.internal_id)
+                queue.append(start_node)
+
+        while queue:
+            current_node = queue.popleft()
+
+            try:
+                # Ask visitor if we should explore from this node
+                should_continue = visitor.visit(current_node)
+            except Exception as e:
+                print(f"Warning: BFS visitor.visit() raised an exception for node {current_node.internal_id}: {e}")
+                should_continue = False # Stop exploring from this node on error
+
+            if should_continue:
+                try:
+                    # Get neighbors to explore (visitor determines filtering/direction)
+                    neighbors = visitor.get_neighbors(current_node)
+                    for neighbor in neighbors:
+                        # Check if neighbor is valid and not visited
+                        if neighbor and neighbor.internal_id in self.nodes and neighbor.internal_id not in visited:
+                            visited.add(neighbor.internal_id)
+                            queue.append(neighbor)
+                except Exception as e:
+                    print(f"Warning: BFS visitor.get_neighbors() raised an exception for node {current_node.internal_id}: {e}")
+                    # Continue BFS, but neighbors of this node won't be added
 
     def __deepcopy__(self, memo):
         """
