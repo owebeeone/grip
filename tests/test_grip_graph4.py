@@ -96,7 +96,7 @@ def create_random_graph(
         else:  # Consumer
             key = ConsumerKey(key_data)
 
-        node = wrap.get_or_add_node(key)  # Uses the key to determine kind
+        node = wrap.get_or_add(key)  # Uses the key to determine kind
         node_keys.append(key)
         nodes.append(node)
     node_creation_end = time.time()
@@ -129,7 +129,7 @@ def create_random_graph(
             chosen_target_indices = random.sample(potential_target_indices, k)
             for target_idx in chosen_target_indices:
                 target_key = node_keys[target_idx]
-                if wrap.connect_nodes_by_key(source_key, target_key):
+                if wrap.connect_nodes(source_key, target_key):
                     link_count += 1
 
     link_creation_end = time.time()
@@ -192,7 +192,7 @@ class TestDGraph(unittest.TestCase):
         self.assertEqual(len(graph.dirty_node_ids), 0)
 
         # Add C1
-        node_c1 = wrap.get_or_add_node(key_c1)
+        node_c1 = wrap.get_or_add(key_c1)
         self.assertEqual(len(graph.nodes), 1)
         self.assertIn(node_c1.internal_id, graph.nodes)
         self.assertIn(node_c1.internal_id, graph.dirty_node_ids)
@@ -202,7 +202,7 @@ class TestDGraph(unittest.TestCase):
         graph.clear_dirty()
 
         # Add P1
-        node_p1 = wrap.get_or_add_node(key_p1)
+        node_p1 = wrap.get_or_add(key_p1)
         self.assertEqual(len(graph.nodes), 2)
         self.assertIn(node_p1.internal_id, graph.dirty_node_ids)
         self.assertEqual(node_p1.kind, DGraphNodeKind.PRODUCER)
@@ -223,7 +223,7 @@ class TestDGraph(unittest.TestCase):
         self.assertFalse(removed_again)
 
         # Try adding C1 again (should get new ID)
-        node_c1_new = wrap.get_or_add_node(key_c1)
+        node_c1_new = wrap.get_or_add(key_c1)
         self.assertEqual(len(graph.nodes), 2)
         self.assertNotEqual(node_c1_new.internal_id, node_c1.internal_id)
         self.assertEqual(node_c1_new.kind, DGraphNodeKind.CONSUMER)
@@ -237,7 +237,7 @@ class TestDGraph(unittest.TestCase):
         wrap = DGraphWrap(graph)
         key_p1 = ProducerKey("P1_Unique")
 
-        wrap.get_or_add_node(key_p1)  # Add first time
+        wrap.get_or_add(key_p1)  # Add first time
         # Try adding again with same key - should raise error
         with self.assertRaises(ValueError):
             graph.add_node(key=key_p1)
@@ -252,12 +252,12 @@ class TestDGraph(unittest.TestCase):
 
         key_c1 = ConsumerKey("C1")
         key_p1 = ProducerKey("P1")
-        node_c1 = wrap.get_or_add_node(key_c1)
-        node_p1 = wrap.get_or_add_node(key_p1)
+        node_c1 = wrap.get_or_add(key_c1)
+        node_p1 = wrap.get_or_add(key_p1)
         graph.clear_dirty()
 
         # Connect C1 -> P1
-        connected = wrap.connect_nodes_by_key(key_c1, key_p1)
+        connected = wrap.connect_nodes(key_c1, key_p1)
         self.assertTrue(connected)
         self.assertIn(node_p1.internal_id, node_c1.forward_links)
         self.assertIn(node_c1.internal_id, node_p1.back_links)
@@ -265,12 +265,12 @@ class TestDGraph(unittest.TestCase):
         graph.clear_dirty()
 
         # Connect again (should do nothing, not mark dirty)
-        connected_again = wrap.connect_nodes_by_key(key_c1, key_p1)
+        connected_again = wrap.connect_nodes(key_c1, key_p1)
         self.assertTrue(connected_again)  # Still returns true as nodes exist
         self.assertEqual(len(graph.dirty_node_ids), 0)
 
         # Disconnect C1 -> P1
-        disconnected = wrap.disconnect_nodes_by_key(key_c1, key_p1)
+        disconnected = wrap.disconnect_nodes(key_c1, key_p1)
         self.assertTrue(disconnected)
         self.assertNotIn(node_p1.internal_id, node_c1.forward_links)
         self.assertNotIn(node_c1.internal_id, node_p1.back_links)
@@ -278,7 +278,7 @@ class TestDGraph(unittest.TestCase):
         graph.clear_dirty()
 
         # Disconnect again (should do nothing)
-        disconnected_again = wrap.disconnect_nodes_by_key(key_c1, key_p1)
+        disconnected_again = wrap.disconnect_nodes(key_c1, key_p1)
         self.assertTrue(disconnected_again)  # Still returns true
         self.assertEqual(len(graph.dirty_node_ids), 0)
 
@@ -292,9 +292,9 @@ class TestDGraph(unittest.TestCase):
 
         key_c1 = ConsumerKey("C1_Reap")
         key_p1 = ProducerKey("P1_Reap")
-        node_c1 = wrap.get_or_add_node(key_c1)
-        node_p1 = wrap.get_or_add_node(key_p1)
-        wrap.connect_nodes_by_key(key_c1, key_p1)
+        node_c1 = wrap.get_or_add(key_c1)
+        node_p1 = wrap.get_or_add(key_p1)
+        wrap.connect_nodes(key_c1, key_p1)
         graph.clear_dirty()
 
         key_id_c1 = group.get_id_from_key(key_c1)
@@ -348,18 +348,18 @@ class TestDGraph(unittest.TestCase):
             attempts += 1
             idx1, idx2 = random.sample(range(N), 2)  # Choose 2 different nodes
             key1, key2 = keys[idx1], keys[idx2]
-            node1, node2 = wrap.get_node_by_key(key1), wrap.get_node_by_key(key2)
+            node1, node2 = wrap.get_node(key1), wrap.get_node(key2)
 
             # Check if connection already exists
             if node2.internal_id not in node1.forward_links:
-                if wrap.connect_nodes_by_key(key1, key2):
+                if wrap.connect_nodes(key1, key2):
                     added_connections.add((key1, key2))
 
         self.assertEqual(len(added_connections), T, f"Failed to add {T} unique connections")
 
         # Remove the added connections
         for key1, key2 in added_connections:
-            removed = wrap.disconnect_nodes_by_key(key1, key2)
+            removed = wrap.disconnect_nodes(key1, key2)
             self.assertTrue(removed, f"Failed to remove connection {key1} -> {key2}")
 
         # Compare final graph with initial graph
@@ -374,31 +374,31 @@ class TestDGraph(unittest.TestCase):
         wrap = DGraphWrap(graph)
 
         k = [ConsumerKey(f"C{i}") for i in range(5)]
-        n = [wrap.get_or_add_node(ki) for ki in k]
+        n = [wrap.get_or_add(ki) for ki in k]
 
         # No cycle initially
-        wrap.connect_nodes_by_key(k[0], k[1])
-        wrap.connect_nodes_by_key(k[1], k[2])
-        wrap.connect_nodes_by_key(k[3], k[4])
+        wrap.connect_nodes(k[0], k[1])
+        wrap.connect_nodes(k[1], k[2])
+        wrap.connect_nodes(k[3], k[4])
         self.assertFalse(graph.has_cycle(), "Acyclic graph reported cycle")
 
         # Simple cycle 0->1->2->0
-        wrap.connect_nodes_by_key(k[2], k[0])
+        wrap.connect_nodes(k[2], k[0])
         self.assertTrue(graph.has_cycle(), "Simple cycle not detected")
         # Check subgraph
         self.assertTrue(graph.has_cycle({n[0].internal_id, n[1].internal_id, n[2].internal_id}))
         self.assertFalse(graph.has_cycle({n[3].internal_id, n[4].internal_id}))
 
         # Remove cycle
-        wrap.disconnect_nodes_by_key(k[2], k[0])
+        wrap.disconnect_nodes(k[2], k[0])
         self.assertFalse(graph.has_cycle(), "Cycle remained after disconnect")
 
         # More complex cycle 0->1->2, 0->3->4->1
-        wrap.connect_nodes_by_key(k[0], k[3])
-        wrap.connect_nodes_by_key(k[3], k[4])
-        wrap.connect_nodes_by_key(k[4], k[1])  # Creates 0->3->4->1->2
+        wrap.connect_nodes(k[0], k[3])
+        wrap.connect_nodes(k[3], k[4])
+        wrap.connect_nodes(k[4], k[1])  # Creates 0->3->4->1->2
         self.assertFalse(graph.has_cycle(), "Acyclic graph reported cycle (complex)")
-        wrap.connect_nodes_by_key(k[2], k[0])  # Creates 0->1->2->0 cycle again
+        wrap.connect_nodes(k[2], k[0])  # Creates 0->1->2->0 cycle again
         self.assertTrue(graph.has_cycle(), "Complex cycle not detected")
 
     def test_cycle_performance(self):
@@ -434,7 +434,7 @@ class TestDGraph(unittest.TestCase):
             idx1 = random.randint(0, N // 2)
         idx2 = random.choice(links)
         key1, key2 = keys[idx1], keys[idx2]
-        wrap.connect_nodes_by_key(key2, key1)
+        wrap.connect_nodes(key2, key1)
 
         # Time cyclic check
         start_time = time.perf_counter()
