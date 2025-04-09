@@ -15,6 +15,7 @@ try:
         GroupKey,
         ProducerKey,
         ConsumerKey,
+        QueryKey,
         DGraphNodeKind,
         DGraphGroup,
         DGraphNode,
