@@ -14,6 +14,7 @@ from grip.grip_dgraph import (
         DGraph,
         DGraphWrap,
         DGraphNodeConstraints,
+        ApplicationKeyBase
     )
 
 from dataclasses import dataclass, field
@@ -29,58 +30,72 @@ class NoOpConstraints(DGraphNodeConstraints):
     def check_can_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
     def post_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
     def post_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
+    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'): pass
 
 _no_op_constraints = NoOpConstraints()
+
+# --- Define Dummy App Key for Testing --- #
+@dataclass(frozen=True, order=True)
+class TestAppKey(ApplicationKeyBase):
+    id: Any
 
 # --- Specific Key Subclasses for Grip Graph ---
 
 @dataclass(frozen=True, order=True)
 class GroupKey(DGraphNodeKey):
     """Key representing a GROUP node."""
-    key_data: Any # Typically a string or int ID
-    # __slots__ = ['key_data']
+    app_key: TestAppKey
     @property
     def kind(self) -> DGraphNodeKind:
         return DGraphNodeKind.GROUP
     @property
     def constraints(self) -> DGraphNodeConstraints:
-        return _no_op_constraints # Use No-Op for basic DGraph tests
+        return _no_op_constraints
+    @property
+    def application_key(self) -> Optional[ApplicationKeyBase]:
+        return self.app_key
 
 @dataclass(frozen=True, order=True)
 class ProducerKey(DGraphNodeKey):
     """Key representing a PRODUCER node."""
-    key_data: Any # Typically a tuple (group_id, producer_id)
-    # __slots__ = ['key_data']
+    app_key: TestAppKey
     @property
     def kind(self) -> DGraphNodeKind:
         return DGraphNodeKind.PRODUCER
     @property
     def constraints(self) -> DGraphNodeConstraints:
-        return _no_op_constraints # Use No-Op for basic DGraph tests
+        return _no_op_constraints
+    @property
+    def application_key(self) -> Optional[ApplicationKeyBase]:
+        return self.app_key
 
 @dataclass(frozen=True, order=True)
 class ConsumerKey(DGraphNodeKey):
     """Key representing a CONSUMER node."""
-    key_data: Any # Typically a tuple (group_id, consumer_id)
-    # __slots__ = ['key_data']
+    app_key: TestAppKey
     @property
     def kind(self) -> DGraphNodeKind:
         return DGraphNodeKind.CONSUMER
     @property
     def constraints(self) -> DGraphNodeConstraints:
-        return _no_op_constraints # Use No-Op for basic DGraph tests
+        return _no_op_constraints
+    @property
+    def application_key(self) -> Optional[ApplicationKeyBase]:
+        return self.app_key
     
 @dataclass(frozen=True, order=True)
 class QueryKey(DGraphNodeKey):
     """Key representing a QUERY node."""
-    key_data: Any # Typically the query string or ID
-    # __slots__ = ['key_data']
+    app_key: TestAppKey
     @property
     def kind(self) -> DGraphNodeKind:
         return DGraphNodeKind.QUERY
     @property
     def constraints(self) -> DGraphNodeConstraints:
-        return _no_op_constraints # Use No-Op for basic DGraph tests
+        return _no_op_constraints
+    @property
+    def application_key(self) -> Optional[ApplicationKeyBase]:
+        return self.app_key
 
 
 
@@ -137,11 +152,11 @@ def create_random_graph(
         # Create unique key data
         key_data = f"Key_{kind.name}_{i}_{seed}"
         if kind == DGraphNodeKind.GROUP:
-            key = GroupKey(key_data)
+            key = GroupKey(TestAppKey(key_data))
         elif kind == DGraphNodeKind.PRODUCER:
-            key = ProducerKey(key_data)
+            key = ProducerKey(TestAppKey(key_data))
         else:  # Consumer
-            key = ConsumerKey(key_data)
+            key = ConsumerKey(TestAppKey(key_data))
 
         node = wrap.get_or_add(key)  # Uses the key to determine kind
         node_keys.append(key)
@@ -232,8 +247,8 @@ class TestDGraph(unittest.TestCase):
         graph = DGraph(group=group)
         wrap = DGraphWrap(graph)
 
-        key_c1 = ConsumerKey("C1")
-        key_p1 = ProducerKey("P1")
+        key_c1 = ConsumerKey(TestAppKey("C1"))
+        key_p1 = ProducerKey(TestAppKey("P1"))
 
         self.assertEqual(len(graph.nodes), 0)
         self.assertEqual(len(graph.dirty_node_ids), 0)
@@ -282,7 +297,7 @@ class TestDGraph(unittest.TestCase):
         group = DGraphGroup()
         graph = DGraph(group=group)
         wrap = DGraphWrap(graph)
-        key_p1 = ProducerKey("P1_Unique")
+        key_p1 = ProducerKey(TestAppKey("P1_Unique"))
 
         wrap.get_or_add(key_p1)  # Add first time
         # Try adding again with same key - should raise error
@@ -297,8 +312,8 @@ class TestDGraph(unittest.TestCase):
         graph = DGraph(group=group)
         wrap = DGraphWrap(graph)
 
-        key_c1 = ConsumerKey("C1")
-        key_p1 = ProducerKey("P1")
+        key_c1 = ConsumerKey(TestAppKey("C1"))
+        key_p1 = ProducerKey(TestAppKey("P1"))
         node_c1 = wrap.get_or_add(key_c1)
         node_p1 = wrap.get_or_add(key_p1)
         graph.clear_dirty()
@@ -337,8 +352,8 @@ class TestDGraph(unittest.TestCase):
         graph = DGraph(group=group)
         wrap = DGraphWrap(graph)
 
-        key_c1 = ConsumerKey("C1_Reap")
-        key_p1 = ProducerKey("P1_Reap")
+        key_c1 = ConsumerKey(TestAppKey("C1_Reap"))
+        key_p1 = ProducerKey(TestAppKey("P1_Reap"))
         node_c1 = wrap.get_or_add(key_c1)
         node_p1 = wrap.get_or_add(key_p1)
         wrap.connect_nodes(key_c1, key_p1)
@@ -420,7 +435,7 @@ class TestDGraph(unittest.TestCase):
         graph = DGraph(group=group)
         wrap = DGraphWrap(graph)
 
-        k = [ConsumerKey(f"C{i}") for i in range(5)]
+        k = [ConsumerKey(TestAppKey(f"C{i}")) for i in range(5)]
         n = [wrap.get_or_add(ki) for ki in k]
 
         # No cycle initially

@@ -9,7 +9,7 @@ from grip.grip_dgraph import (
     DGraphWrap,
 )
 from dataclasses import dataclass
-from typing import Any, Set
+from typing import Any, Set, Optional
 
 # --- Key Definitions specific to GripGraph4 ---
 
@@ -92,6 +92,7 @@ class BaseGripConstraints(DGraphNodeConstraints):
             )
         # print(f"OK (Base check): {source_node.kind.name} <- {target_node.kind.name}")
 
+
     # --- Default post hooks and disconnect checks remain the same ---
     def post_connect_to(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
     def post_receive_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
@@ -108,6 +109,13 @@ class ConsumerConstraints(BaseGripConstraints):
     # Consumer receives connections FROM No one
     ALLOWED_SOURCE_KINDS = set() # Empty
     # No need to override check methods anymore
+    
+    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'):
+        """Default check: Verifies application key uniqueness if present."""
+        app_key = node_to_add.application_key
+        if app_key is None:
+            raise ConstraintViolationError("Consume nodes must have an application key")
+
 
 # Singleton instance
 _consumer_constraints = ConsumerConstraints()
@@ -119,7 +127,13 @@ class ProducerConstraints(BaseGripConstraints):
     # Producer receives connections FROM Consumer or Query
     ALLOWED_SOURCE_KINDS = {DGraphNodeKind.CONSUMER, DGraphNodeKind.QUERY}
     # No need to override check methods anymore
-
+    
+    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'):
+        """Default check: Verifies application key uniqueness if present."""
+        app_key = node_to_add.application_key
+        if app_key is None:
+            raise ConstraintViolationError("Producer nodes must have an application key")
+        
 # Singleton instance
 _producer_constraints = ProducerConstraints()
 
@@ -129,6 +143,12 @@ class GroupConstraints(BaseGripConstraints):
     ALLOWED_TARGET_KINDS = {DGraphNodeKind.GROUP, DGraphNodeKind.QUERY}
     # Group receives connections FROM Group
     ALLOWED_SOURCE_KINDS = {DGraphNodeKind.GROUP, DGraphNodeKind.CONSUMER, DGraphNodeKind.PRODUCER}
+    
+    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'):
+        """Default check: Verifies application key uniqueness if present."""
+        app_key = node_to_add.application_key
+        if app_key is not None:
+            raise ConstraintViolationError("Context/Group nodes must not have an application key")
 
 # Singleton instance
 _group_constraints = GroupConstraints()
@@ -140,6 +160,12 @@ class QueryConstraints(BaseGripConstraints):
     # Query receives connections FROM Consumer
     ALLOWED_SOURCE_KINDS = {DGraphNodeKind.CONSUMER}
     # No need to override check methods anymore
+    
+    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'):
+        """Default check: Verifies application key uniqueness if present."""
+        app_key = node_to_add.application_key
+        if app_key is not None:
+            raise ConstraintViolationError("Query nodes must not have an application key")
 
 # Singleton instance
 _query_constraints = QueryConstraints()
