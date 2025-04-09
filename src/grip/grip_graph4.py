@@ -96,28 +96,6 @@ class ConsumerConstraints(BaseGripConstraints):
             raise ConstraintViolationError("Consumer nodes must have an application key")
         # Uniqueness check within context will be added later if needed
 
-    def post_add_node(self, graph: "DGraph", added_node: "DGraphNode"):
-        """Post-add: Update the parent context index."""
-        app_key = added_node.application_key
-        kind = added_node.kind
-        if app_key is None:
-            return  # Should have been caught by check_add_node
-
-        parent_context_id: Optional[int] = None
-        # TODO: Robustly determine parent context ID from added_node or app_key
-        if hasattr(app_key, "context_id"):
-            parent_context_id = app_key.context_id
-
-        if parent_context_id is not None:
-            parent_node = graph.nodes.get(parent_context_id)
-            if parent_node and parent_node.context_resource_index is not None:
-                index_key = (app_key, kind)
-                # Check again before write? Or assume check_add_node was sufficient?
-                # Let's assume check_add_node handled uniqueness check.
-                parent_node.context_resource_index[index_key] = added_node.internal_id
-                graph._mark_dirty(parent_context_id)  # Mark parent dirty
-            # else: Log warning?
-
 
 # Singleton instance
 _consumer_constraints = ConsumerConstraints()
@@ -163,7 +141,78 @@ class ProducerConstraints(BaseGripConstraints):
 _producer_constraints = ProducerConstraints()
 
 
-class GroupConstraints(BaseGripConstraints):
+class GroupQueryConstraints(BaseGripConstraints):
+    def check_can_receive_connection_from(
+        self, source_node: "DGraphNode", target_node: "DGraphNode"
+    ):
+        """Check if this Group node (target) can receive connection FROM source_node.
+        Enforces uniqueness for Producer/Consumer app_key within this context.
+        """
+        super().check_can_receive_connection_from(source_node, target_node)  # Basic kind check
+
+        # Check uniqueness for Producers/Consumers within this Group's context
+        if source_node.kind in (DGraphNodeKind.PRODUCER, DGraphNodeKind.CONSUMER):
+            app_key = source_node.application_key
+            kind = source_node.kind
+            if app_key is None:
+                # This should be prevented by Producer/Consumer check_add_node, but check again
+                raise ConstraintViolationError(
+                    f"{kind.name} node {source_node.internal_id} must have an application key to "
+                    "connect to a Group."
+                )
+
+            # Check the context index on the Group node (target_node)
+            if target_node.context_resource_index is None:
+                # This means post_add_node didn't run or was incorrect
+                raise RuntimeError(
+                    f"Group node {target_node.internal_id} has no context_resource_index initialized."
+                )
+
+            index_key = (app_key, kind)
+            existing_node_id = target_node.context_resource_index.get(index_key)
+
+            if existing_node_id is not None and existing_node_id != source_node.internal_id:
+                # Found a *different* node with the same app_key/kind in this context
+                raise ConstraintViolationError(
+                    f"Context (Group {target_node.internal_id}) already has a {kind.name} registered "
+                    f"for ApplicationKey {app_key} (Node {existing_node_id}). Cannot connect Node "
+                    f"{source_node.internal_id}."
+                )
+            # If existing_node_id is None or matches source_node.internal_id, connection is allowed.
+
+    def post_receive_connection_from(self, source_node: "DGraphNode", target_node: "DGraphNode"):
+        """Update the Group's context index after receiving connection FROM source."""
+        super().post_receive_connection_from(source_node, target_node)  # Base hook if any
+        # Add Producer/Consumer to the context index
+        app_key = source_node.application_key
+        kind = source_node.kind
+        assert app_key is not None
+        index_key = (app_key, kind)
+        # Update the index - check_can_receive handled conflicts
+        target_node.context_resource_index[index_key] = source_node.internal_id
+
+    def post_remove_connection_from(self, source_node: "DGraphNode", target_node: "DGraphNode"):
+        """Remove entry from Group's context index after connection FROM source is removed."""
+        super().post_remove_connection_from(source_node, target_node)  # Base hook if any
+
+        if target_node.kind != DGraphNodeKind.GROUP:
+            return
+        if target_node.context_resource_index is None:
+            return  # Should exist
+
+        index_key = (source_node.application_key, source_node.kind)
+        # Remove if it maps to the disconnecting source node
+        if target_node.context_resource_index.get(index_key) != source_node.internal_id:
+            raise RuntimeError(
+                f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+            )
+        if target_node.context_resource_index.pop(index_key, None) is None:
+            raise RuntimeError(
+                f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+            )
+
+
+class GroupConstraints(GroupQueryConstraints):
     """Constraints for GROUP nodes (Dependency Model: Group -> Group)."""
 
     # Group connects TO Group
@@ -186,7 +235,7 @@ class GroupConstraints(BaseGripConstraints):
 _group_constraints = GroupConstraints()
 
 
-class QueryConstraints(BaseGripConstraints):
+class QueryConstraints(GroupQueryConstraints):
     """Constraints for QUERY nodes (Dependency Model: Query -> Producer, Receives from Consumer)."""
 
     # Query connects TO Producer
