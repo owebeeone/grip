@@ -184,32 +184,34 @@ class GroupQueryConstraints(BaseGripConstraints):
         """Update the Group's context index after receiving connection FROM source."""
         super().post_receive_connection_from(source_node, target_node)  # Base hook if any
         # Add Producer/Consumer to the context index
-        app_key = source_node.application_key
-        kind = source_node.kind
-        assert app_key is not None
-        index_key = (app_key, kind)
-        # Update the index - check_can_receive handled conflicts
-        target_node.context_resource_index[index_key] = source_node.internal_id
+        if source_node.kind in (DGraphNodeKind.PRODUCER, DGraphNodeKind.CONSUMER):
+
+            app_key = source_node.application_key
+            kind = source_node.kind
+            assert app_key is not None
+            index_key = (app_key, kind)
+            # Update the index - check_can_receive handled conflicts
+            target_node.context_resource_index[index_key] = source_node.internal_id
 
     def post_remove_connection_from(self, source_node: "DGraphNode", target_node: "DGraphNode"):
         """Remove entry from Group's context index after connection FROM source is removed."""
         super().post_remove_connection_from(source_node, target_node)  # Base hook if any
 
-        if target_node.kind != DGraphNodeKind.GROUP:
-            return
-        if target_node.context_resource_index is None:
-            return  # Should exist
+        if source_node.kind in (DGraphNodeKind.PRODUCER, DGraphNodeKind.CONSUMER):
 
-        index_key = (source_node.application_key, source_node.kind)
-        # Remove if it maps to the disconnecting source node
-        if target_node.context_resource_index.get(index_key) != source_node.internal_id:
-            raise RuntimeError(
-                f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
-            )
-        if target_node.context_resource_index.pop(index_key, None) is None:
-            raise RuntimeError(
-                f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
-            )
+            if target_node.context_resource_index is None:
+                return  # Should exist
+
+            index_key = (source_node.application_key, source_node.kind)
+            # Remove if it maps to the disconnecting source node
+            if target_node.context_resource_index.get(index_key) != source_node.internal_id:
+                raise RuntimeError(
+                    f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+                )
+            if target_node.context_resource_index.pop(index_key, None) is None:
+                raise RuntimeError(
+                    f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+                )
 
 
 class GroupConstraints(GroupQueryConstraints):
