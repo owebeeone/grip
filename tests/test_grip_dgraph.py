@@ -31,6 +31,7 @@ class NoOpConstraints(DGraphNodeConstraints):
     def post_disconnect_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
     def post_remove_connection_from(self, source_node: 'DGraphNode', target_node: 'DGraphNode'): pass
     def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'): pass
+    def post_add_node(self, graph: 'DGraph', added_node: 'DGraphNode'): pass
 
 _no_op_constraints = NoOpConstraints()
 

@@ -107,12 +107,19 @@ class DGraphNodeConstraints(ABC):
         pass
 
     @abstractmethod
-    def check_add_node(self, graph: 'DGraph', node_to_add: 'DGraphNode'):
+    def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check if the given node can be added to the graph.
-           Called by DGraph.add_node before adding the node to the main dictionary.
-           The node_to_add object contains the application_key already assigned.
-           Implementations should raise ConstraintViolationError if the node cannot be added
-           (e.g., due to application key uniqueness violation).
+        Called by DGraph.add_node before adding the node to the main dictionary.
+        The node_to_add object contains the application_key already assigned.
+        Implementations should raise ConstraintViolationError if the node cannot be added
+        (e.g., due to application key uniqueness violation).
+        """
+        pass
+
+    @abstractmethod
+    def post_add_node(self, graph: "DGraph", added_node: "DGraphNode"):
+        """Called after a node has been successfully added to the graph's node dictionary.
+           Used for post-addition bookkeeping, like updating context indices.
         """
         pass
 
@@ -266,6 +273,10 @@ class DGraphNode(DGraphNodeBase):
     key_internal_id: int = -1  # -1 indicates no key associated (or key was reaped)
     forward_links: Set[int] = field(default_factory=set, compare=False)  # Set of target node IDs
     back_links: Set[int] = field(default_factory=set, compare=False)  # Set of source node IDs
+    # NEW: Index stored *on* context nodes (Groups/Queries)
+    context_resource_index: Optional[Dict[Tuple[ApplicationKeyBase, DGraphNodeKind], int]] = field(
+        default=None, compare=False, repr=False
+    )
 
     # __slots__ = ['graph', 'internal_id', 'kind', 'key_internal_id', 'forward_links', 'back_links'] # Optional memory optimization
 
@@ -322,8 +333,13 @@ class DGraphNode(DGraphNodeBase):
         app_key_info = (
             f", app_key={type(self.application_key).__name__}" if self.application_key else ""
         )
+        context_index_info = (
+            f", index_size={len(self.context_resource_index)}"
+            if self.context_resource_index is not None
+            else ""
+        )
         return (
-            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}{key_info}{app_key_info}, "
+            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}{key_info}{app_key_info}{context_index_info}, "
             f"fwd={sorted(list(self.forward_links))}, bck={sorted(list(self.back_links))})"
         )
 
@@ -359,13 +375,17 @@ class DGraph:
     def __post_init__(self):
         # Rebuild only key_id index if needed
         if self.nodes and not self._key_id_to_node_id:
-             print("Warning: Rebuilding key_id index from existing nodes...")
-             for node_id, node in self.nodes.items():
-                 if node.key_internal_id != -1:
-                     if node.key_internal_id not in self._key_id_to_node_id:
-                         self._key_id_to_node_id[node.key_internal_id] = node_id
-                     else:
-                         print(f"Warning: Key ID {node.key_internal_id} collision during index rebuild.")
+            print("Warning: Rebuilding key_id index from existing nodes...")
+            self._key_id_to_node_id.clear()
+            for node_id, node in self.nodes.items():
+                # Rebuild key_id index (need key object for hash)
+                dgraph_key = node.get_key()
+                if dgraph_key:
+                    if node.key_internal_id != -1:
+                        if node.key_internal_id not in self._key_id_to_node_id:
+                            self._key_id_to_node_id[node.key_internal_id] = node_id
+                        else:
+                            print(f"Warning: Key ID {node.key_internal_id} collision during index rebuild for node {node_id}.")
 
     def _mark_dirty(self, node_id: int):
         """Marks a node as dirty (modified)."""
@@ -418,10 +438,11 @@ class DGraph:
 
     def add_node(self, key: DGraphNodeKey) -> DGraphNode:
         """
-        Adds a new node, performs DGraphNodeKey uniqueness check, and calls
-        the constraint's check_add_node before finalizing.
+        Adds a node, performs DGraphNodeKey check, calls constraint checks,
+        initializes context index if needed, adds node, updates key_id index,
+        and calls post-add hook.
         """
-        app_key = key.get_application_key()
+        app_key = key.application_key
         kind = key.kind
 
         # --- DGraphNodeKey Uniqueness Check (via DGraphGroup internal ID) ---
@@ -429,12 +450,14 @@ class DGraph:
         if check_key_id is not None:
             existing_node_id_by_keyid = self._key_id_to_node_id.get(check_key_id)
             if existing_node_id_by_keyid is not None and existing_node_id_by_keyid in self.nodes:
-                 raise ValueError(f"DGraphNodeKey {key} (internal id {check_key_id}) is already associated with node {existing_node_id_by_keyid} in this graph.")
-            elif existing_node_id_by_keyid is not None: # Index inconsistent
-                 if check_key_id in self._key_id_to_node_id:
+                raise ValueError(
+                    f"DGraphNodeKey {key} (internal id {check_key_id}) is already associated with node {existing_node_id_by_keyid} in this graph."
+                )
+            elif existing_node_id_by_keyid is not None:  # Index inconsistent
+                if check_key_id in self._key_id_to_node_id:
                     del self._key_id_to_node_id[check_key_id]
 
-        # --- Create Node Object --- 
+        # --- Create Node Object ---
         key_id = self.group.register_key(key)
         node_id = self.group.generate_node_id()
         node = DGraphNode(
@@ -442,46 +465,61 @@ class DGraph:
             internal_id=node_id,
             kind=kind,
             key_internal_id=key_id,
-            application_key=app_key,
+            application_key=app_key
         )
 
+        # --- Constraint Check ---
         try:
-            key.constraints.check_add_node(self, node)
+            constraints = key.constraints
+            constraints.check_add_node(self, node)
         except Exception as e:
-             if VERBOSE:
-                  print(f"Constraint check failed for adding node via key {key} (app_key: {app_key}): {e}")
-             raise
+            if VERBOSE:
+                print(
+                    f"Constraint check failed for adding node via key {key} (app_key: {app_key}): {e}"
+                )
+            raise
 
-        # --- Add Node and Update Indices --- 
+        # --- Add Node and Update Indices ---
         self.nodes[node_id] = node
         self._key_id_to_node_id[key_id] = node_id
+
+        # --- Post-Add Hook ---
+        try:
+            constraints.post_add_node(self, node)
+        except Exception as e:
+            print(f"Warning: Post-add hook failed for node {node_id}: {e}")
 
         self._mark_dirty(node_id)
         return node
 
     def remove_node(self, node_id: int) -> bool:
-        """Removes a node and cleans up the key_id index."""
+        """Removes a node and cleans up the key_id index.
+           Context index cleanup must be handled by constraints/hooks if needed.
+        """
         node_to_remove = self.nodes.get(node_id)
         if not node_to_remove: return False
 
-        # Get internal key ID directly from node
         key_internal_id = node_to_remove.key_internal_id
-        # REMOVED fetching of app_key and kind for index cleanup
 
-        # --- Update Indices BEFORE removing node object --- 
-        # 1. key_id index
+        # TODO: Add pre-remove constraint hook? If constraints need to clean up
+        #       parent context index before node/connections are gone.
+        # try:
+        #    key = node_to_remove.get_key()
+        #    if key: key.constraints.pre_remove_node(self, node_to_remove)
+        # except Exception as e: print(f"Warning: Pre-remove hook failed: {e}")
+
+        # --- Update key_id Index ---
         if key_internal_id != -1:
             if self._key_id_to_node_id.get(key_internal_id) == node_id:
                  del self._key_id_to_node_id[key_internal_id]
-        # REMOVED cleanup for _app_key_kind_to_node_id index
 
-        # --- Remove connections --- 
+        # --- Remove connections ---
         target_ids = list(node_to_remove.forward_links)
         source_ids = list(node_to_remove.back_links)
         # ... disconnect from targets ...
         # ... disconnect from sources ...
 
-        # --- Remove node object and clean dirty set --- 
+        # --- Remove node object and clean dirty set ---
         del self.nodes[node_id]
         self.dirty_node_ids.discard(node_id)
         return True
@@ -700,7 +738,7 @@ class DGraph:
         result.dirty_node_ids = copy.deepcopy(self.dirty_node_ids, memo)
         result._key_id_to_node_id = copy.deepcopy(self._key_id_to_node_id, memo)
 
-        # --- Verification/Fixup --- 
+        # --- Verification/Fixup ---
         # This loop ensures the back-references are correct. Deepcopy should
         # handle this via the memo, but this provides extra robustness.
         for node in result.nodes.values():
@@ -781,10 +819,10 @@ class DGraphWrap:
 
 
 @dataclass(frozen=True, order=True)
-class DGraphNodeKey(ABC): # Make it an Abstract Base Class
+class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
     """Base class for keys associated with DGraph nodes.
-       Subclasses must implement kind, constraints, and application_key properties.
-       They must also be hashable and comparable, likely based on their application_key.
+    Subclasses must implement kind, constraints, and application_key properties.
+    They must also be hashable and comparable, likely based on their application_key.
     """
 
     @property
@@ -800,11 +838,10 @@ class DGraphNodeKey(ABC): # Make it an Abstract Base Class
         pass
 
     @property
-    @abstractmethod
     def application_key(self) -> Optional[ApplicationKeyBase]:
         """Returns the application-specific key/data object associated with this node, if any."""
-        pass
+        return None
 
-    def __deepcopy__(self, memo: Dict[int, Any]) -> 'DGraphNodeKey':
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "DGraphNodeKey":
         # Keys are immutable and potentially shared, return self.
         return self
