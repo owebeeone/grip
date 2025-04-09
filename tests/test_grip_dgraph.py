@@ -203,7 +203,7 @@ def create_random_graph(
     return wrap, node_keys
 
 
-# --- Test Visitor Implementation ---
+# --- Test Visitor Implementations ---
 class SimpleBFSVisitor(BFSTraversalVisitor):
     def __init__(self, forward: bool = True, kind_filter: Optional[Set[DGraphNodeKind]] = None, stop_at_kind: Optional[DGraphNodeKind] = None):
         self.visited_order: List[int] = []
@@ -222,6 +222,40 @@ class SimpleBFSVisitor(BFSTraversalVisitor):
         # Directly call the stored lambda
         return self.neighbor_generator(node, self.kind_filter)
 
+class CollectingBFSVisitor(BFSTraversalVisitor):
+    """Visitor to collect up to N nodes of specific kinds during BFS."""
+    def __init__(self, max_per_kind=10):
+        self.max_per_kind = max_per_kind
+        self.collected: Dict[DGraphNodeKind, List[DGraphNode]] = {
+            DGraphNodeKind.GROUP: [],
+            DGraphNodeKind.PRODUCER: [],
+            DGraphNodeKind.CONSUMER: [],
+            DGraphNodeKind.QUERY: [],
+        }
+        self.collected_group_query: List[DGraphNode] = []
+        self.visited_ids: Set[int] = set() # Track all visited node IDs
+
+    def visit(self, node: "DGraphNode") -> bool:
+        self.visited_ids.add(node.internal_id)
+        kind = node.kind
+        # Collect specific kind if limit not reached
+        if kind in self.collected and len(self.collected[kind]) < self.max_per_kind:
+            self.collected[kind].append(node)
+        # Collect Group/Query combo if limit not reached
+        if kind in (DGraphNodeKind.GROUP, DGraphNodeKind.QUERY) and len(self.collected_group_query) < self.max_per_kind:
+             self.collected_group_query.append(node)
+        # Always continue BFS exploration from this node
+        return True
+
+    def get_neighbors(self, node: "DGraphNode") -> Iterable["DGraphNode"]:
+        # Simple forward traversal for collection
+        return node.get_forward_neighbors()
+
+    def get_collected_ids(self, kind: DGraphNodeKind) -> Set[int]:
+        return {n.internal_id for n in self.collected.get(kind, [])}
+
+    def get_collected_group_query_ids(self) -> Set[int]:
+        return {n.internal_id for n in self.collected_group_query}
 
 # --- Unit Test Class ---
 
@@ -729,6 +763,66 @@ class TestDGraph(unittest.TestCase):
         self.assertIn(visitor_multi.visited_order[0], {node_c1.internal_id, node_g1.internal_id})
         self.assertIn(visitor_multi.visited_order[1], {node_c1.internal_id, node_g1.internal_id})
         self.assertNotEqual(visitor_multi.visited_order[0], visitor_multi.visited_order[1])
+
+    def test_bfs_traversal_random_dag(self):
+        """Test BFS traversal on random DAGs, collecting nodes by kind."""
+        N = 100
+        L = 2
+        M = 30 # Mean links (as requested, very dense for N=100)
+        U = 40 # Max links (needs to be >= M)
+        max_collect = 10
+        kind_weights = {
+            DGraphNodeKind.GROUP: 1,
+            DGraphNodeKind.PRODUCER: 1,
+            DGraphNodeKind.CONSUMER: 1,
+            DGraphNodeKind.QUERY: 1,
+        }
+
+        for seed in range(200, 205): # Run for 5 different seeds
+            with self.subTest(seed=seed):
+                print(f"\n--- Running test_bfs_traversal_random_dag with seed {seed} ---")
+                wrap, keys = create_random_graph(
+                    N=N, L=L, U=U, M=M, std_dev=5.0, # Added std_dev
+                    acyclic=True,
+                    kind_weights=kind_weights,
+                    seed=seed
+                )
+                graph = wrap.graph
+                all_nodes = list(graph.nodes.values())
+                self.assertTrue(len(all_nodes) > 0, "Graph creation failed?")
+
+                # Choose a random start node
+                start_node = random.choice(all_nodes)
+                print(f"Starting BFS from node: {start_node}")
+
+                # Perform BFS collection
+                collector_visitor = CollectingBFSVisitor(max_per_kind=max_collect)
+                graph.bfs_traverse([start_node], collector_visitor)
+
+                print(f"Visited {len(collector_visitor.visited_ids)} nodes during BFS.")
+
+                # Assertions
+                graph_node_ids = set(graph.nodes.keys())
+
+                # Check counts and validity for each specific kind
+                for kind in DGraphNodeKind:
+                    collected_nodes = collector_visitor.collected[kind]
+                    collected_ids = collector_visitor.get_collected_ids(kind)
+                    print(f"Collected {len(collected_ids)} nodes of kind {kind.name}")
+                    self.assertLessEqual(len(collected_ids), max_collect, f"Collected more than {max_collect} nodes for {kind.name}")
+                    for node_id in collected_ids:
+                        self.assertIn(node_id, graph_node_ids, f"Collected node ID {node_id} (kind {kind.name}) not in graph")
+                        self.assertEqual(graph.nodes[node_id].kind, kind, f"Collected node {node_id} has incorrect kind")
+
+                # Check counts and validity for Group/Query combo
+                collected_gq_nodes = collector_visitor.collected_group_query
+                collected_gq_ids = collector_visitor.get_collected_group_query_ids()
+                print(f"Collected {len(collected_gq_ids)} nodes of kind GROUP or QUERY")
+                self.assertLessEqual(len(collected_gq_ids), max_collect, f"Collected more than {max_collect} nodes for GROUP/QUERY combo")
+                for node_id in collected_gq_ids:
+                     self.assertIn(node_id, graph_node_ids, f"Collected node ID {node_id} (Group/Query) not in graph")
+                     node_kind = graph.nodes[node_id].kind
+                     self.assertIn(node_kind, {DGraphNodeKind.GROUP, DGraphNodeKind.QUERY}, f"Collected node {node_id} has incorrect kind {node_kind.name}")
 
 
 # --- Test Runner ---
