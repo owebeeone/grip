@@ -207,7 +207,8 @@ def create_random_graph(
 class SimpleBFSVisitor(BFSTraversalVisitor):
     def __init__(self, forward: bool = True, kind_filter: Optional[Set[DGraphNodeKind]] = None, stop_at_kind: Optional[DGraphNodeKind] = None):
         self.visited_order: List[int] = []
-        self.neighbor_generator = 'get_forward_neighbors' if forward else 'get_backward_neighbors'
+        # Use lambdas to directly reference the neighbor methods - single line assignment
+        self.neighbor_generator = (lambda node, kinds: node.get_forward_neighbors(kinds)) if forward else (lambda node, kinds: node.get_backward_neighbors(kinds))
         self.kind_filter = kind_filter
         self.stop_at_kind = stop_at_kind
 
@@ -218,8 +219,8 @@ class SimpleBFSVisitor(BFSTraversalVisitor):
         return True # Continue exploring
 
     def get_neighbors(self, node: "DGraphNode") -> Iterable["DGraphNode"]:
-        neighbor_func = getattr(node, self.neighbor_generator)
-        return neighbor_func(kinds=self.kind_filter)
+        # Directly call the stored lambda
+        return self.neighbor_generator(node, self.kind_filter)
 
 
 # --- Unit Test Class ---
