@@ -23,11 +23,13 @@ class DGraphNodeConstraintsData(ABC):
     """
     pass
 
+
 class DGraphNodeBase(ABC):
     """Abstract base class for DGraph nodes.
     """
     # kind: DGraphNodeKind
     constraint_data: DGraphNodeConstraintsData
+
 
 class DGraphNodeConstraints(ABC):
     """Abstract base class for constraints on DGraph nodes.
@@ -67,53 +69,6 @@ class DGraphNodeConstraints(ABC):
         return self
     
 
-# --- Key Definition ---
-
-@dataclass(frozen=True, order=True)
-class DGraphNodeKey(ABC): # Make it an Abstract Base Class
-    """Base class for keys associated with DGraph nodes."""
-    # Keys must be hashable and comparable for use in dictionaries/sets
-    key_data: Any
-
-    # Consider adding __slots__ for memory efficiency if many keys are expected
-    # __slots__ = ['key_data']
-
-    @property
-    @abstractmethod
-    def kind(self) -> DGraphNodeKind:
-        """Returns the kind of node this key represents."""
-        pass
-    
-    def __deepcopy__(self, memo: Dict[int, Any]) -> DGraphNodeKey:
-        # No copying allowed for keys.
-        return self
-    
-
-# --- Specific Key Subclasses ---
-
-@dataclass(frozen=True, order=True)
-class GroupKey(DGraphNodeKey):
-    """Key representing a GROUP node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.GROUP
-
-@dataclass(frozen=True, order=True)
-class ProducerKey(DGraphNodeKey):
-    """Key representing a PRODUCER node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.PRODUCER
-
-@dataclass(frozen=True, order=True)
-class ConsumerKey(DGraphNodeKey):
-    """Key representing a CONSUMER node."""
-    # __slots__ = ['key_data']
-    @property
-    def kind(self) -> DGraphNodeKind:
-        return DGraphNodeKind.CONSUMER
 
 
 # --- Graph Group (ID/Key Management) ---
@@ -633,6 +588,64 @@ class DGraphWrap:
 
     # Add other convenience methods as needed...
     # e.g., remove_node_by_key(key), add_keyless_node(kind) etc.
+
+
+
+# --- Key Definition ---
+
+@dataclass(frozen=True, order=True)
+class DGraphNodeKey(ABC): # Make it an Abstract Base Class
+    """Base class for keys associated with DGraph nodes."""
+    # Keys must be hashable and comparable for use in dictionaries/sets
+    key_data: Any
+
+    # Consider adding __slots__ for memory efficiency if many keys are expected
+    # __slots__ = ['key_data']
+
+    @property
+    @abstractmethod
+    def kind(self) -> DGraphNodeKind:
+        """Returns the kind of node this key represents."""
+        pass
+    
+    def __deepcopy__(self, memo: Dict[int, Any]) -> DGraphNodeKey:
+        # No copying allowed for keys.
+        return self
+    
+
+# --- Specific Key Subclasses for Grip Graph ---
+
+@dataclass(frozen=True, order=True)
+class GroupKey(DGraphNodeKey):
+    """Key representing a GROUP node."""
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.GROUP
+
+@dataclass(frozen=True, order=True)
+class ProducerKey(DGraphNodeKey):
+    """Key representing a PRODUCER node."""
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.PRODUCER
+
+@dataclass(frozen=True, order=True)
+class ConsumerKey(DGraphNodeKey):
+    """Key representing a CONSUMER node."""
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.CONSUMER
+    
+@dataclass(frozen=True, order=True)
+class QueryKey(DGraphNodeKey):
+    """Key representing a CONSUMER node."""
+    # __slots__ = ['key_data']
+    @property
+    def kind(self) -> DGraphNodeKind:
+        return DGraphNodeKind.QUERY
 
 
 # --- Example Usage ---
