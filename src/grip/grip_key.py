@@ -25,7 +25,7 @@ class GripKey:
     """
     _name: str
     _is_main: bool = True
-    _grip: 'Grip' = dtfield(compare=False, repr=False, hash=False)
+    _grip: 'GripRegistry' = dtfield(compare=False, repr=False, hash=False)
     _spec: _GripKeySpec = dtfield(
         default_factory=_GripKeySpec, compare=False, repr=False, hash=False)
     _alt: 'GripKey' = dtfield(compare=False, repr=False, hash=False)
@@ -56,15 +56,15 @@ class GripKey:
         alt = kwds.get('_alt', None)
         if alt is None:
             # Initialize with name and grip
-            name = args[0] if len(args) > 0 else kwds['_name']
-            grip = args[1] if len(args) > 1 else kwds['_grip']
+            name = args[0] if len(args) > 0 else kwds['name']
+            grip = args[1] if len(args) > 1 else kwds['grip']
             is_main = True
             spec = _GripKeySpec()
         else:
             # Initialize with a GripKey to make an alternative GripKey
             assert len(args) == 0, "Alternative GripKey initialization doesn't support args"
-            assert '_name' not in kwds, "Alternative GripKey initialization doesn't support _name"
-            assert '_grip' not in kwds, "Alternative GripKey initialization doesn't support _grip"
+            assert 'name' not in kwds, "Alternative GripKey initialization doesn't support name"
+            assert 'grip' not in kwds, "Alternative GripKey initialization doesn't support grip"
             name = alt.name
             grip = alt.grip
             is_main = not alt.is_main

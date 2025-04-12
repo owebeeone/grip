@@ -35,6 +35,16 @@ class TestGripKey(unittest.TestCase):
         self.main_key2.spec.data_type = int
         self.main_key2.spec.default = 200
         
+    def test_definition(self):
+        """Test definition of GripKeyMain and GripKeyMain.Prospective."""
+        
+        self.assertEqual(self.main_key.name, self.key_name)
+        self.assertIs(self.main_key.grip, self.mock_grip)
+        self.assertEqual(self.pro_key.name, self.key_name)
+        self.assertIs(self.pro_key.grip, self.mock_grip)
+        
+        
+        
     def test_hash_and_equality(self):
         """Test hash and equality of GripKeyMain and GripKeyMain.Prospective."""
         self.assertNotEqual(self.main_key, self.main_key2)
