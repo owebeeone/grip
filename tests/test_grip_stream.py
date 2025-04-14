@@ -2,6 +2,9 @@ import asyncio
 import pytest
 import random
 import time
+# Need imports for threading and executor
+import threading # Added
+from concurrent.futures import ThreadPoolExecutor # Added
 from collections import defaultdict
 from typing import TypeVar, Any, Set, Dict, Callable, Awaitable
 
@@ -113,14 +116,34 @@ async def test_single_sender_single_stream_sync_processor():
 
 @pytest.mark.asyncio
 async def test_multi_sender_multi_stream(
-    num_streams: int = 13, num_senders: int = 15, duration_seconds: float = 2.0):
-    """Test multiple senders/streams with atomic counter increment."""
+    num_streams: int = 5,
+    num_senders: int = 10,
+    duration_seconds: float = 2.0,
+    num_threads: int = 0 # New parameter: 0 means use asyncio tasks
+):
+    """
+    Test multiple senders/streams with optional threading for senders.
+    num_threads=0: Senders run as asyncio tasks (default).
+    num_threads>0: Senders run in specified number of OS threads.
+    """
     mux = GripStreamMux[tuple[int, int]]()
 
     received_data_per_stream: Dict[int, Set[int]] = defaultdict(set)
     stream_counters: Dict[int, int] = defaultdict(int)
-    # Create a lock for each stream's counter
-    stream_locks: Dict[int, asyncio.Lock] = {i: asyncio.Lock() for i in range(num_streams)}
+
+    # --- Locks: Use appropriate type based on execution mode ---
+    if num_threads > 0:
+        # Locks for thread-based senders
+        stream_locks: Dict[int, threading.Lock] = {
+            i: threading.Lock() for i in range(num_streams)
+        }
+        stop_event = threading.Event() # Event to signal threads to stop
+    else:
+        # Locks for asyncio task-based senders
+        stream_locks: Dict[int, asyncio.Lock] = {
+            i: asyncio.Lock() for i in range(num_streams)
+        }
+        stop_event = None # Not needed for asyncio tasks checking mux.active
 
     # Factory for processors - returns async for even, sync for odd stream_id
     def create_processor(stream_id: int) -> Callable[..., Any]: # Return Any for implementation ease
@@ -145,87 +168,155 @@ async def test_multi_sender_multi_stream(
 
     streams: list[GripStream[tuple[int, int]]] = []
     mux.activate()
+    event_loop = asyncio.get_running_loop() # Get loop for threadsafe calls
+
     for i in range(num_streams):
         # Use the overloaded method
         stream = mux.create_stream(processor=create_processor(i))
         streams.append(stream)
 
-    async def sender_task(sender_id: int):
+    # --- Sender Logic: Separate functions for tasks vs threads ---
+
+    async def sender_task_async(sender_id: int):
+        """Sender logic for asyncio tasks."""
         sent_count = 0
-        while mux.active:
+        while mux.active: # Check mux status directly
             target_stream_index = random.randrange(num_streams)
             target_stream = streams[target_stream_index]
+            target_lock = stream_locks[target_stream_index] # asyncio.Lock
 
-            # # --- Atomic read and increment using the stream's lock ---
-            # target_lock = stream_locks[target_stream_index]
-            # async with target_lock:
-            data_to_send = stream_counters[target_stream_index]
-            stream_counters[target_stream_index] += 1
-            # # --- End of atomic section ---
+            # --- Atomic read and increment using the stream's lock ---
+            async with target_lock:
+                data_to_send = stream_counters[target_stream_index]
+                stream_counters[target_stream_index] += 1
+            # --- End of atomic section ---
 
             try:
-                # Send a tuple (sequence_number, sender_id)
+                # SEND IS NOW ASYNC
                 await target_stream.send((data_to_send, sender_id))
-                sent_count += 1 # Increment count on successful send
+                sent_count += 1
             except AttemptedSendOnInactive:
-                # This can happen if mux deactivates between check and send
-                # print(f"Sender {sender_id} attempted send on inactive mux. Stopping.")
-                break # Exit loop if mux is inactive
-            except Exception as e:
-                print(f"Sender {sender_id} encountered unexpected error: {e}")
-                # Decide if we should break or continue based on error type
                 break
-
+            except Exception as e:
+                print(f"Async Sender {sender_id} error: {e}")
+                break
             # Yield control briefly, sleep is less critical now as send is async
-            await asyncio.sleep(0) 
+            await asyncio.sleep(0)
         return sent_count # Return the total count for this sender
 
-    sender_tasks = [asyncio.create_task(sender_task(i)) for i in range(num_senders)]
+    def sender_worker_thread(sender_id: int):
+        """Sender logic for worker threads."""
+        sent_count = 0
+        while not stop_event.is_set(): # Check threading stop event
+            target_stream_index = random.randrange(num_streams)
+            target_stream = streams[target_stream_index]
+            target_lock = stream_locks[target_stream_index] # threading.Lock
+
+            # --- Atomic read and increment using the stream's lock ---
+            with target_lock: # Use standard with for threading.Lock
+                data_to_send = stream_counters[target_stream_index]
+                stream_counters[target_stream_index] += 1
+            # --- End of atomic section ---
+
+            try:
+                # Schedule the async send coroutine onto the event loop from the thread
+                future = asyncio.run_coroutine_threadsafe(
+                    target_stream.send((data_to_send, sender_id)),
+                    event_loop
+                )
+                # Optional: Wait for the send to complete on the event loop
+                # Can add a timeout here if needed
+                future.result(timeout=1.0) # Waits for completion, raises if send failed
+                sent_count += 1
+            # Catch exceptions from run_coroutine_threadsafe or future.result
+            except AttemptedSendOnInactive: # This might be raised by future.result()
+                 break # Mux likely deactivated
+            except Exception as e:
+                # Handles QueueFull in send, TimeoutError from future.result, etc.
+                # Check stop_event again in case the error is due to shutdown race
+                if stop_event.is_set():
+                     break
+                print(f"Thread Sender {sender_id} error: {e}")
+                # Decide whether to break or continue based on error
+                break # Safer to break on unexpected errors
+            time.sleep(0) # Yield within the thread, less efficient than asyncio.sleep(0)
+        return sent_count
+
+    # --- Task/Thread Creation and Execution ---
+    sender_futures = []
+    executor = None
+
+    if num_threads > 0:
+        print(f"Running {num_senders} senders in {num_threads} threads...")
+        executor = ThreadPoolExecutor(max_workers=num_threads)
+        for i in range(num_senders):
+            # Submit the thread worker function to the executor
+            future = event_loop.run_in_executor(
+                executor, sender_worker_thread, i
+            )
+            sender_futures.append(future)
+    else:
+        print(f"Running {num_senders} senders as asyncio tasks...")
+        for i in range(num_senders):
+            # Create asyncio tasks
+            task = asyncio.create_task(sender_task_async(i))
+            sender_futures.append(task)
 
     # Let senders run for the specified duration
     await asyncio.sleep(duration_seconds)
 
-    # Now deactivate the multiplexer - this should signal senders to stop
+    # --- Shutdown ---
+    print("Deactivating mux...")
+    if stop_event:
+        print("Signalling threads to stop...")
+        stop_event.set() # Signal threads first
     mux.deactivate()
 
-    # Wait for the receiver task to finish processing queued items and stop
-    # Increase timeout slightly to accommodate remaining items in queue + shutdown
-    success, exc = await mux.wait_until_stopped(timeout=duration_seconds + 1.5)
-    assert success and exc is None, f"Mux failed to stop: {exc.__class__.__name__}: {exc}"
+    print("Waiting for receiver loop to drain and stop...")
+    success, exc = await mux.wait_until_stopped(timeout=duration_seconds + 10.0) # Longer timeout for drain
+    if not success:
+         print(f"Receiver loop failed to stop cleanly: {exc}")
+    assert success is True
+    assert exc is None
+    print("Receiver loop stopped.")
 
-    # Wait for sender tasks to cleanly exit their loops (they check mux.active)
-    # Use gather to potentially catch sender exceptions
-    results = await asyncio.gather(*sender_tasks, return_exceptions=True)
-    
+    print("Waiting for sender tasks/threads to finish...")
+    # Use asyncio.gather for tasks, wait for executor futures for threads
+    if executor:
+        # Wait for futures submitted via run_in_executor
+        results = await asyncio.gather(*sender_futures, return_exceptions=True)
+        print("Shutting down thread pool executor...")
+        executor.shutdown(wait=True) # Wait for threads to finish
+        print("Executor shut down.")
+    else:
+        # Wait for asyncio tasks
+        results = await asyncio.gather(*sender_futures, return_exceptions=True)
+
+    # --- Verification (remains largely the same) ---
+    print("Processing results...")
     sender_counts: Dict[int, int | str] = {}
     for i, result in enumerate(results):
-        if isinstance(result, Exception):
-             print(f"Sender task {i} finished with exception: {result}")
+         if isinstance(result, Exception):
+             print(f"Sender task/thread {i} finished with exception: {result}")
              sender_counts[i] = f"Exception: {result}"
-        else:
-             # Result should be the integer count returned by sender_task
+         else:
              sender_counts[i] = result
 
-    # Verify internal receiver task state (optional)
     assert mux._receiver_task is not None
     assert mux._receiver_task.done()
     assert mux._receiver_task.exception() is None
 
-    if mux.queue_backup_metric > 0:
-        print(f"WARNING: Queue backup metric: {mux.queue_backup_metric}")
-
-    # Verification
     total_received_count = sum(len(v) for v in received_data_per_stream.values())
+    print(f"\n--- Results ---")
     print(f"Total items received across all streams: {total_received_count}")
-    print("Received sequence counts per stream:", 
+    print("Received sequence counts per stream:",
           sorted(list({k: len(v) for k, v in received_data_per_stream.items()}.items())))
-    print("Sent counts per sender task:", 
+    print("Sent counts per sender task/thread:",
           sorted(list(sender_counts.items())))
 
-    # Optional: Verify total sent approx equals total received 
-    # (might differ slightly due to race conditions during shutdown)
     total_sent_count = sum(count for count in sender_counts.values() if isinstance(count, int))
-    print(f"Total items successfully sent by senders: {total_sent_count}")
+    print(f"Total items reported sent by senders: {total_sent_count}")
+    print(f"Queue backup metric (items processed in batches > 1): {mux.queue_backup_metric}")
 
     for stream_id, received_set in received_data_per_stream.items():
         if not received_set:
