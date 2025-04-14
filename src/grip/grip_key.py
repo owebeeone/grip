@@ -1,9 +1,23 @@
 # Internal spec for a GripKey containing its type and default value
-from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Optional, TYPE_CHECKING
+from abc import ABC
+from typing import Any, ClassVar
 
 from datatrees.datatrees import datatree, dtfield
 
+
+class GripRegistry(ABC): 
+    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
+    _tap_definitions: dict[str, 'TapDefinition'] = dtfield(default_factory=dict, repr=False)
+    _tapscopes: dict[str, 'TapScope'] = dtfield(default_factory=dict, repr=False)
+    
+    def get_grip(self, name: str) -> 'GripKey':
+        return self._keys[name]
+
+    def get_tap(self, name: str) -> 'TapDefinition':
+        return self._tap_definitions[name]
+
+    def get_scope(self, name: str) -> 'TapScope':
+        return self._tapscopes[name]
 
 @datatree
 class _GripKeySpec:
@@ -13,7 +27,7 @@ class _GripKeySpec:
     
     def __deepcopy__(self, memo: dict) -> 'GripKey':
         return self
-    
+
 
 # GripKey is an identifier for a value managed by GRIP.
 # It is bound to a parent Grip and contains type/default spec.
@@ -92,7 +106,7 @@ class GripKey:
         return self._name
     
     @property
-    def grip(self) -> 'Grip':
+    def grip(self) -> GripRegistry:
         return self._grip
     
     @property
