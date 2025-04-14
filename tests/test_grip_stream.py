@@ -3,9 +3,11 @@ import pytest
 import random
 import time
 from collections import defaultdict
-from typing import TypeVar, Any, Set, Dict
+from typing import TypeVar, Any, Set, Dict, Callable, Awaitable
 
-from grip.grip_stream import GripStream, GripStreamMux, AttemptedSendOnInactive
+from grip.grip_stream import (
+    GripStream, GripStreamMux, AttemptedSendOnInactive, StreamAlreadyAddedError
+)
 
 DType = TypeVar('DType')
 
@@ -36,38 +38,74 @@ async def test_mux_immediate_deactivation():
 
 
 @pytest.mark.asyncio
-async def test_single_sender_single_stream():
-    """Test one sender sending data to one stream with the new API."""
+async def test_single_sender_single_stream_async_processor():
+    """Test one sender sending data to one stream with async processor using overload."""
     mux = GripStreamMux[int]()
     received_data = []
 
-    # Processor now receives single items
-    def processor(data: int):
+    async def processor(data: int):
+        await asyncio.sleep(random.uniform(0, 0.001))
         received_data.append(data)
-        # Return value is not used by the new mux
 
-    stream = GripStream[int](processor=processor)
+    # Use the overloaded method - type checker knows it's async
+    stream = mux.create_stream(processor=processor)
 
     mux.activate()
-    mux.add_stream(stream) # Safe to add after activation
 
     async def sender_task():
         for i in range(5):
             stream.send(i)
-            # Small sleep simulating work and allowing context switching
-            await asyncio.sleep(random.uniform(0.01, 0.05)) 
+            await asyncio.sleep(random.uniform(0.01, 0.05))
 
     sender = asyncio.create_task(sender_task())
-    await sender # Wait for sender to finish sending
+    await sender
 
-    # Give receiver loop a bit more time to process items from the queue
+    await asyncio.sleep(0.1)
+
+    mux.deactivate()
+    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    assert success is True
+    assert exc is None
+
+    assert received_data == [0, 1, 2, 3, 4]
+    assert mux._receiver_task is not None
+    assert mux._receiver_task.done()
+    assert mux._receiver_task.exception() is None
+
+
+@pytest.mark.asyncio
+async def test_single_sender_single_stream_sync_processor():
+    """Test one sender sending data to one stream with sync processor using overload."""
+    mux = GripStreamMux[int]()
+    received_data = []
+
+    # Synchronous processor
+    def processor(data: int):
+        # Simulate some CPU work
+        _ = [x*x for x in range(10)] 
+        received_data.append(data)
+
+    # Use the overloaded method - type checker knows it's sync
+    stream = mux.create_stream(processor=processor)
+
+    mux.activate()
+
+    async def sender_task():
+        for i in range(5):
+            stream.send(i)
+            await asyncio.sleep(random.uniform(0.01, 0.05))
+
+    sender = asyncio.create_task(sender_task())
+    await sender
+
     await asyncio.sleep(0.1) 
 
     mux.deactivate()
-    await mux.wait_until_stopped(timeout=1.0)
+    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    assert success is True
+    assert exc is None
 
     assert received_data == [0, 1, 2, 3, 4]
-    # Verify internal task state (optional)
     assert mux._receiver_task is not None
     assert mux._receiver_task.done()
     assert mux._receiver_task.exception() is None
@@ -75,36 +113,42 @@ async def test_single_sender_single_stream():
 
 @pytest.mark.asyncio
 async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int = 15, duration_seconds: int = 2):
-    """Test multiple senders sending data to multiple streams randomly with the new API."""
-    # Data type is tuple of (sequence_number: int, sender_id: int)
+    """Test multiple senders/streams with async processor and overloaded factory."""
     mux = GripStreamMux[tuple[int, int]]()
 
-    # Dictionary to store received sequence numbers per stream
     received_data_per_stream: Dict[int, Set[int]] = defaultdict(set)
-    # Dictionary to track the next expected sequence number for sending per stream
     stream_counters: Dict[int, int] = defaultdict(int)
 
-    # Processor receives a single tuple: (sequence_number, sender_id)
-    def create_processor(stream_id: int):
-        def processor(data: tuple[int, int]):
+    # Factory for processors - returns async for even, sync for odd stream_id
+    def create_processor(stream_id: int) -> Callable[..., Any]: # Return Any for implementation ease
+        # Common logic for checking duplicates
+        def check_and_add(data: tuple[int, int]):
             seq_num, sender_id = data
             assert seq_num not in received_data_per_stream[stream_id], \
-                f"Stream {stream_id} received duplicate sequence number {seq_num} from sender {sender_id}"
+                f"Stream {stream_id} received duplicate seq num {seq_num} from sender {sender_id}"
             received_data_per_stream[stream_id].add(seq_num)
-        return processor
+            
+        if stream_id % 2 == 0:
+            # Even stream_id: Use an async processor
+            async def async_processor(data: tuple[int, int]):
+                # Simulate tiny async work
+                await asyncio.sleep(0.00001) 
+                check_and_add(data)
+            return async_processor
+        else:
+            # Odd stream_id: Use a sync processor
+            def sync_processor(data: tuple[int, int]):
+                # Simulate tiny sync work
+                _ = [x*x for x in range(5)]
+                check_and_add(data)
+            return sync_processor
 
     streams: list[GripStream[tuple[int, int]]] = []
+    mux.activate()
     for i in range(num_streams):
-        stream = GripStream[tuple[int, int]](
-            processor=create_processor(i)
-        )
+        # Use the overloaded method
+        stream = mux.create_stream(processor=create_processor(i))
         streams.append(stream)
-
-    mux.activate() # Starts the receiver loop
-
-    # Add streams after activation
-    for stream in streams:
-        mux.add_stream(stream)
 
     async def sender_task(sender_id: int):
         """Sends data until the mux becomes inactive. Returns count of sent items."""
@@ -144,7 +188,9 @@ async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int
 
     # Wait for the receiver task to finish processing queued items and stop
     # Increase timeout slightly to accommodate remaining items in queue + shutdown
-    await mux.wait_until_stopped(timeout=duration_seconds + 1.5) 
+    success, exc = await mux.wait_until_stopped(timeout=duration_seconds + 1.5)
+    assert success is True
+    assert exc is None
 
     # Wait for sender tasks to cleanly exit their loops (they check mux.active)
     # Use gather to potentially catch sender exceptions

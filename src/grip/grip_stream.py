@@ -17,11 +17,11 @@ mux = GripStreamMux[str]()
 mux.activate() # Start receiver loop in background
 
 received = []
-def processor1(data: str):
+async def processor1(data: str):
+    await asyncio.sleep(0.01) # Can perform async operations
     received.append(data)
 
-stream1 = GripStream(processor1)
-mux.add_stream(stream1)
+stream1 = mux.create_stream(processor1)
 
 async def sender():
     stream1.send("hello")
@@ -36,8 +36,9 @@ print(received) # Output: ['hello', 'world']
 """
 
 import asyncio
-from collections.abc import Callable
-from typing import Generic, TypeVar, Optional
+from collections.abc import Callable, Awaitable
+from typing import Generic, TypeVar, Optional, overload, Any
+import inspect
 from datatrees import datatree
 from datatrees.datatrees import dtfield
 from grip.grip_base import GripBaseException
@@ -77,10 +78,10 @@ _SENTINEL = object()  # Sentinel value to signal queue shutdown
 class GripStream(Generic[DType]):
     """
     Represents a stream of data directed towards a specific processor,
-    managed by a GripStreamMux.
+    managed by a GripStreamMux. Processor MUST now be awaitable.
     """
 
-    processor: Callable[[DType], None]
+    processor: Callable[[DType], Awaitable[None]]
     mux: Optional["GripStreamMux"] = dtfield(default=None, repr=False)
 
     def send(self, data: DType) -> None:
@@ -101,8 +102,7 @@ class GripStreamMux(Generic[DType]):
     Routes incoming data to the appropriate stream's processor.
     """
 
-    receiver_loop_error_handler: Callable[[Exception], None] = dtfield(
-        default=lambda msg: ())
+    receiver_loop_error_handler: Callable[[Exception], None] = dtfield(default=lambda msg: ())
     # The central queue for receiving data from all streams
     queue: asyncio.Queue[tuple[GripStream[DType], DType] | object] = dtfield(
         default_factory=asyncio.Queue
@@ -160,7 +160,8 @@ class GripStreamMux(Generic[DType]):
 
     def add_stream(self, stream: GripStream[DType]) -> None:
         """
-        Add a stream to the multiplexer.
+        Add an existing GripStream instance to the multiplexer.
+        Prefer using `create_stream` factory method.
         """
         if stream.mux is not None:
             # Use the more specific exception
@@ -168,7 +169,38 @@ class GripStreamMux(Generic[DType]):
         if stream not in self.streams:
             stream.mux = self
             self.streams.append(stream)
-        # No need to bump futures anymore
+
+    # Overload signature for async processors
+    @overload
+    def create_stream(self, processor: Callable[[DType], Awaitable[None]]) -> GripStream[DType]:
+        ...
+
+    # Overload signature for sync processors
+    @overload
+    def create_stream(self, processor: Callable[[DType], None]) -> GripStream[DType]:
+        ...
+
+    # Single implementation handling both cases
+    def create_stream(self, processor: Callable[..., Any]) -> GripStream[DType]:
+        """
+        Factory method to create a new GripStream, add it to this mux,
+        and set its processor. Supports both sync and async processors.
+        Returns the created stream.
+        """
+        final_processor: Callable[[DType], Awaitable[None]]
+
+        if inspect.iscoroutinefunction(processor):
+            # If the provided processor is already async, use it directly
+            final_processor = processor
+        else:
+            # If it's sync, wrap it in an async function
+            async def async_wrapper(data: DType):
+                processor(data)
+            final_processor = async_wrapper
+
+        new_stream = GripStream[DType](processor=final_processor)
+        self.add_stream(new_stream) # Sets mux reference and adds to list
+        return new_stream
 
     async def _receive_loop(self):
         """
@@ -195,10 +227,7 @@ class GripStreamMux(Generic[DType]):
 
                 try:
                     # Call the processor associated with the source stream
-                    # NOTE: This processes items ONE BY ONE.
-                    # If batching is desired, logic needs modification here.
-                    # See previous discussion on batching alternatives.
-                    source_stream.processor(data)
+                    await source_stream.processor(data)
                 except Exception as e:
                     # Handle processor errors gracefully
                     self.receiver_loop_error_handler(e)
@@ -211,4 +240,3 @@ class GripStreamMux(Generic[DType]):
                 # Catch potential errors during queue get or processing
                 self.receiver_loop_error_handler(e)
                 await asyncio.sleep(0.1)  # Avoid tight loop on persistent errors
-
