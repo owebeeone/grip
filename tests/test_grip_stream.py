@@ -54,7 +54,7 @@ async def test_single_sender_single_stream_async_processor():
 
     async def sender_task():
         for i in range(5):
-            stream.send(i)
+            await stream.send(i)
             await asyncio.sleep(random.uniform(0.01, 0.05))
 
     sender = asyncio.create_task(sender_task())
@@ -92,7 +92,7 @@ async def test_single_sender_single_stream_sync_processor():
 
     async def sender_task():
         for i in range(5):
-            stream.send(i)
+            await stream.send(i)
             await asyncio.sleep(random.uniform(0.01, 0.05))
 
     sender = asyncio.create_task(sender_task())
@@ -112,7 +112,8 @@ async def test_single_sender_single_stream_sync_processor():
 
 
 @pytest.mark.asyncio
-async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int = 15, duration_seconds: int = 2):
+async def test_multi_sender_multi_stream(
+    num_streams: int = 13, num_senders: int = 15, duration_seconds: float = 2.0):
     """Test multiple senders/streams with async processor and overloaded factory."""
     mux = GripStreamMux[tuple[int, int]]()
 
@@ -132,7 +133,7 @@ async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int
             # Even stream_id: Use an async processor
             async def async_processor(data: tuple[int, int]):
                 # Simulate tiny async work
-                await asyncio.sleep(0.00001) 
+                await asyncio.sleep(0.0000) 
                 check_and_add(data)
             return async_processor
         else:
@@ -164,7 +165,7 @@ async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int
 
             try:
                 # Send a tuple (sequence_number, sender_id)
-                target_stream.send((data_to_send, sender_id))
+                await target_stream.send((data_to_send, sender_id))
                 sent_count += 1 # Increment count on successful send
             except AttemptedSendOnInactive:
                 # This can happen if mux deactivates between check and send
@@ -175,7 +176,8 @@ async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int
                 # Decide if we should break or continue based on error type
                 break
 
-            await asyncio.sleep(random.uniform(0, 0.0001)) # Shorter sleep
+            # Yield control briefly, sleep is less critical now as send is async
+            await asyncio.sleep(0) 
         return sent_count # Return the total count for this sender
 
     sender_tasks = [asyncio.create_task(sender_task(i)) for i in range(num_senders)]
@@ -209,6 +211,9 @@ async def test_multi_sender_multi_stream(num_streams: int = 13, num_senders: int
     assert mux._receiver_task is not None
     assert mux._receiver_task.done()
     assert mux._receiver_task.exception() is None
+
+    if mux.queue_backup_metric > 0:
+        print(f"WARNING: Queue backup metric: {mux.queue_backup_metric}")
 
     # Verification
     total_received_count = sum(len(v) for v in received_data_per_stream.values())

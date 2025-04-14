@@ -37,7 +37,7 @@ print(received) # Output: ['hello', 'world']
 
 import asyncio
 from collections.abc import Callable, Awaitable
-from typing import Generic, TypeVar, Optional, overload, Any
+from typing import Generic, TypeVar, Optional, overload, Any, List
 import inspect
 from datatrees import datatree
 from datatrees.datatrees import dtfield
@@ -78,39 +78,67 @@ _SENTINEL = object()  # Sentinel value to signal queue shutdown
 class GripStream(Generic[DType]):
     """
     Represents a stream of data directed towards a specific processor,
-    managed by a GripStreamMux. Processor MUST now be awaitable.
+    managed by a GripStreamMux. Buffers data internally and notifies mux.
+    Processor MUST be awaitable.
     """
 
     processor: Callable[[DType], Awaitable[None]]
     mux: Optional["GripStreamMux"] = dtfield(default=None, repr=False)
+    # Internal buffer for this stream
+    _buffer: Optional[List[DType]] = dtfield(default=None, init=False, repr=False)
+    # Lock to protect access to the buffer during send/receive operations
+    _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False)
 
-    def send(self, data: DType) -> None:
+    async def send(self, data: DType) -> None:
         """
-        Send data to the stream via its multiplexer's queue.
+        Add data to the stream's internal buffer.
+        If the buffer was previously empty (None), notify the multiplexer.
         Raises AttemptedSendOnInactive if the multiplexer is not active.
         """
         if self.mux is None or not self.mux.active:
             raise AttemptedSendOnInactive("Multiplexer is not active or stream not added")
-        # The mux queue handles the async aspect
-        self.mux.queue.put_nowait((self, data))
+        
+        needs_notification = False
+        async with self._lock:
+            if self._buffer is None:
+                self._buffer = []
+                needs_notification = True
+            self._buffer.append(data)
+            
+        if needs_notification:
+            # Put self onto the queue to signal data is ready
+            # Use put_nowait as send is often called from sync contexts 
+            # or tasks that shouldn't block on the queue put.
+            # Handle QueueFull exception if necessary, though less likely with 
+            # single item notifications per stream burst.
+            try:
+                self.mux.queue.put_nowait(self) 
+            except asyncio.QueueFull:
+                # This case is less likely now, but could happen if many streams 
+                # become ready simultaneously and the receiver is slow. 
+                # How to handle? Log? Drop? Retry? 
+                # For now, let's log and potentially drop/re-raise.
+                print(f"WARNING: Mux queue full when trying to notify for stream {self}. Data might be delayed/lost.")
+                # Optionally re-raise or implement retry logic
+                # raise # Or: await self.mux.queue.put(self) # If send itself becomes async
 
 
 @datatree
 class GripStreamMux(Generic[DType]):
     """
-    Multiplexes data from multiple GripStreams using an asyncio.Queue.
-    Routes incoming data to the appropriate stream's processor.
+    Multiplexes streams using notifications. Receives stream objects, 
+    processes their internal buffers.
     """
 
     receiver_loop_error_handler: Callable[[Exception], None] = dtfield(default=lambda msg: ())
-    # The central queue for receiving data from all streams
-    queue: asyncio.Queue[tuple[GripStream[DType], DType] | object] = dtfield(
+    # Queue now holds GripStream instances needing processing
+    queue: asyncio.Queue[GripStream[DType] | object] = dtfield(
         default_factory=asyncio.Queue
     )
-    # Keep track of streams added, maybe useful, though processors are stored implicitly
     streams: list[GripStream[DType]] = dtfield(default_factory=list)
     active: bool = dtfield(default=False)
     _receiver_task: Optional[asyncio.Task] = dtfield(default=None, repr=False)
+    queue_backup_metric: int = 0
 
     def activate(self):
         """
@@ -158,7 +186,7 @@ class GripStreamMux(Generic[DType]):
                 return False, e
         return True, None
 
-    def add_stream(self, stream: GripStream[DType]) -> None:
+    def _add_stream(self, stream: GripStream[DType]) -> None:
         """
         Add an existing GripStream instance to the multiplexer.
         Prefer using `create_stream` factory method.
@@ -196,47 +224,66 @@ class GripStreamMux(Generic[DType]):
             # If it's sync, wrap it in an async function
             async def async_wrapper(data: DType):
                 processor(data)
+                # Yield control briefly to avoid tight loop
+                await asyncio.sleep(0)
             final_processor = async_wrapper
 
         new_stream = GripStream[DType](processor=final_processor)
-        self.add_stream(new_stream) # Sets mux reference and adds to list
+        self._add_stream(new_stream) # Sets mux reference and adds to list
         return new_stream
 
     async def _receive_loop(self):
         """
-        Internal task that continuously receives data from the queue
-        and calls the appropriate stream processor.
-        Exits when a sentinel value is received or the mux becomes inactive.
+        Internal task that receives ready GripStream instances from the queue,
+        retrieves and clears their buffers, and processes the buffered data.
         """
         while self.active:
+            buffer_to_process: Optional[List[DType]] = None
+            source_stream: Optional[GripStream[DType]] = None
             try:
+                # Get the stream instance that has data ready
                 item = await self.queue.get()
 
                 if item is _SENTINEL:
-                    # print(f"Mux {id(self)} receiver loop received sentinel, exiting.")
                     self.queue.task_done()
-                    break
+                    break 
 
-                # Ensure mux didn't become inactive while waiting
                 if not self.active:
-                    # print(f"Mux {id(self)} became inactive while waiting, exiting loop.")
-                    self.queue.task_done()  # Mark item done even if not processed
+                    self.queue.task_done() 
                     break
 
-                source_stream, data = item
-
-                try:
-                    # Call the processor associated with the source stream
-                    await source_stream.processor(data)
-                except Exception as e:
-                    # Handle processor errors gracefully
-                    self.receiver_loop_error_handler(e)
-
-                self.queue.task_done()  # Signal that this item is processed
+                # Item should be a GripStream instance
+                if not isinstance(item, GripStream):
+                    print(f"WARNING: Invalid item received in mux queue: {item}")
+                    self.queue.task_done()
+                    continue
+                    
+                source_stream = item
+                
+                # Atomically get and clear the buffer
+                async with source_stream._lock:
+                    buffer_to_process = source_stream._buffer
+                    source_stream._buffer = None # Mark buffer as empty
+                
+                # Process the retrieved buffer if it wasn't empty
+                if buffer_to_process:
+                    try:
+                        if len(buffer_to_process) > 1:
+                            self.queue_backup_metric += len(buffer_to_process) - 1
+                        #     print(f"WARNING: Processing {len(buffer_to_process)} items from stream {source_stream}")
+                        # Process items one by one from the retrieved buffer
+                        for data_item in buffer_to_process:
+                            await source_stream.processor(data_item) 
+                    except Exception as e:
+                        self.receiver_loop_error_handler(e)
+                        # Continue processing remaining items in batch? Or stop?
+                        # Current: Continues loop to get next stream notification.
+                
+                self.queue.task_done() 
 
             except asyncio.CancelledError as e:
                 self.receiver_loop_error_handler(e)
+                break 
             except Exception as e:
-                # Catch potential errors during queue get or processing
-                self.receiver_loop_error_handler(e)
-                await asyncio.sleep(0.1)  # Avoid tight loop on persistent errors
+                 self.receiver_loop_error_handler(e)
+                 await asyncio.sleep(0.1) 
