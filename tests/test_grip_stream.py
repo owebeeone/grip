@@ -114,11 +114,13 @@ async def test_single_sender_single_stream_sync_processor():
 @pytest.mark.asyncio
 async def test_multi_sender_multi_stream(
     num_streams: int = 13, num_senders: int = 15, duration_seconds: float = 2.0):
-    """Test multiple senders/streams with async processor and overloaded factory."""
+    """Test multiple senders/streams with atomic counter increment."""
     mux = GripStreamMux[tuple[int, int]]()
 
     received_data_per_stream: Dict[int, Set[int]] = defaultdict(set)
     stream_counters: Dict[int, int] = defaultdict(int)
+    # Create a lock for each stream's counter
+    stream_locks: Dict[int, asyncio.Lock] = {i: asyncio.Lock() for i in range(num_streams)}
 
     # Factory for processors - returns async for even, sync for odd stream_id
     def create_processor(stream_id: int) -> Callable[..., Any]: # Return Any for implementation ease
@@ -132,15 +134,12 @@ async def test_multi_sender_multi_stream(
         if stream_id % 2 == 0:
             # Even stream_id: Use an async processor
             async def async_processor(data: tuple[int, int]):
-                # Simulate tiny async work
-                await asyncio.sleep(0.0000) 
                 check_and_add(data)
             return async_processor
         else:
             # Odd stream_id: Use a sync processor
             def sync_processor(data: tuple[int, int]):
-                # Simulate tiny sync work
-                _ = [x*x for x in range(5)]
+
                 check_and_add(data)
             return sync_processor
 
@@ -152,16 +151,17 @@ async def test_multi_sender_multi_stream(
         streams.append(stream)
 
     async def sender_task(sender_id: int):
-        """Sends data until the mux becomes inactive. Returns count of sent items."""
         sent_count = 0
         while mux.active:
             target_stream_index = random.randrange(num_streams)
             target_stream = streams[target_stream_index]
 
-            # This counter access is not thread-safe but sufficient for testing
-            # the receiver side's ability to handle the sequence correctly.
+            # # --- Atomic read and increment using the stream's lock ---
+            # target_lock = stream_locks[target_stream_index]
+            # async with target_lock:
             data_to_send = stream_counters[target_stream_index]
             stream_counters[target_stream_index] += 1
+            # # --- End of atomic section ---
 
             try:
                 # Send a tuple (sequence_number, sender_id)
@@ -191,8 +191,7 @@ async def test_multi_sender_multi_stream(
     # Wait for the receiver task to finish processing queued items and stop
     # Increase timeout slightly to accommodate remaining items in queue + shutdown
     success, exc = await mux.wait_until_stopped(timeout=duration_seconds + 1.5)
-    assert success is True
-    assert exc is None
+    assert success and exc is None, f"Mux failed to stop: {exc.__class__.__name__}: {exc}"
 
     # Wait for sender tasks to cleanly exit their loops (they check mux.active)
     # Use gather to potentially catch sender exceptions

@@ -236,54 +236,79 @@ class GripStreamMux(Generic[DType]):
         """
         Internal task that receives ready GripStream instances from the queue,
         retrieves and clears their buffers, and processes the buffered data.
+        Continues draining the queue after deactivation until empty.
         """
-        while self.active:
-            buffer_to_process: Optional[List[DType]] = None
-            source_stream: Optional[GripStream[DType]] = None
-            try:
-                # Get the stream instance that has data ready
-                item = await self.queue.get()
+        should_stop = False
+        try:
+            while not should_stop:
+                buffer_to_process: Optional[List[DType]] = None
+                source_stream: Optional[GripStream[DType]] = None
+                try:
+                    # Get the stream instance that has data ready
+                    # Use a small timeout to prevent blocking forever if something 
+                    # unexpected happens during shutdown and the queue never empties 
+                    # (though it should).
+                    item = await asyncio.wait_for(self.queue.get(), timeout=1.0) 
 
-                if item is _SENTINEL:
-                    self.queue.task_done()
-                    break 
+                    if item is _SENTINEL:
+                        # Sentinel received. Stop accepting new work (already done by 
+                        # deactivate) but continue processing items already in the queue.
+                        self.active = False # Ensure flag is false
+                        self.queue.task_done()
+                        # If the queue is now empty, we can prepare to stop.
+                        if self.queue.empty():
+                           should_stop = True
+                        continue # Continue loop to check queue again or exit
 
-                if not self.active:
-                    self.queue.task_done() 
-                    break
-
-                # Item should be a GripStream instance
-                if not isinstance(item, GripStream):
-                    print(f"WARNING: Invalid item received in mux queue: {item}")
-                    self.queue.task_done()
-                    continue
+                    # Item should be a GripStream instance
+                    if not isinstance(item, GripStream):
+                        print(f"WARNING: Invalid item received in mux queue: {item}")
+                        self.queue.task_done()
+                        continue
+                        
+                    source_stream = item
                     
-                source_stream = item
-                
-                # Atomically get and clear the buffer
-                async with source_stream._lock:
-                    buffer_to_process = source_stream._buffer
-                    source_stream._buffer = None # Mark buffer as empty
-                
-                # Process the retrieved buffer if it wasn't empty
-                if buffer_to_process:
-                    try:
-                        if len(buffer_to_process) > 1:
-                            self.queue_backup_metric += len(buffer_to_process) - 1
-                        #     print(f"WARNING: Processing {len(buffer_to_process)} items from stream {source_stream}")
-                        # Process items one by one from the retrieved buffer
-                        for data_item in buffer_to_process:
-                            await source_stream.processor(data_item) 
-                    except Exception as e:
-                        self.receiver_loop_error_handler(e)
-                        # Continue processing remaining items in batch? Or stop?
-                        # Current: Continues loop to get next stream notification.
-                
-                self.queue.task_done() 
+                    # Atomically get and clear the buffer
+                    async with source_stream._lock:
+                        buffer_to_process = source_stream._buffer
+                        source_stream._buffer = None # Mark buffer as empty
+                    
+                    # Process the retrieved buffer if it wasn't empty
+                    if buffer_to_process:
+                        try:
+                            if len(buffer_to_process) > 1:
+                                self.queue_backup_metric += len(buffer_to_process) - 1
+                            for data_item in buffer_to_process:
+                                await source_stream.processor(data_item) 
+                        except Exception as e:
+                            self.receiver_loop_error_handler(e)
+                    
+                    self.queue.task_done() 
 
-            except asyncio.CancelledError as e:
-                self.receiver_loop_error_handler(e)
-                break 
-            except Exception as e:
-                 self.receiver_loop_error_handler(e)
-                 await asyncio.sleep(0.1) 
+                except asyncio.TimeoutError:
+                    # Timeout waiting for queue item. If mux is inactive, 
+                    # assume queue is drained or stuck, prepare to stop.
+                    if not self.active:
+                        # print("Receiver loop timeout while inactive, stopping.")
+                        should_stop = True
+                    # If active, maybe just log and continue?
+                    # else: print("Receiver loop timeout while active.")
+                    continue
+                except asyncio.CancelledError as e:
+                    self.receiver_loop_error_handler(e)
+                    should_stop = True # Exit loop if cancelled
+                    # Do not call task_done() here, cancellation handles it
+                    raise # Re-raise CancelledError
+                except Exception as e:
+                     self.receiver_loop_error_handler(e)
+                     # Avoid tight loop on unexpected errors
+                     await asyncio.sleep(0.1) 
+                
+                # Check exit condition after processing or handling exceptions/sentinel
+                if not self.active and self.queue.empty():
+                    should_stop = True
+                    
+        finally:
+            # Ensure active is false upon any exit (normal, exception, cancellation)
+            self.active = False
+            # print("Receiver loop finished.")
