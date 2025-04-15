@@ -286,15 +286,15 @@ class TestDGraph(unittest.TestCase):
             )
             # Compare link structure using get_forward_links and get_back_links
             all_kinds = set(DGraphNodeKind)
-            n1_fwd_ids = {n.internal_id for n in n1.get_forward_links(all_kinds, sorted=False)}
-            n2_fwd_ids = {n.internal_id for n in n2.get_forward_links(all_kinds, sorted=False)}
+            n1_fwd_ids = {n.internal_id for n in n1.get_forward_links(all_kinds, should_sort=False)}
+            n2_fwd_ids = {n.internal_id for n in n2.get_forward_links(all_kinds, should_sort=False)}
             self.assertEqual(
                 n1_fwd_ids,
                 n2_fwd_ids,
                 f"Node {node_id} forward links mismatch {msg or ''}",
             )
-            n1_bck_ids = {n.internal_id for n in n1.get_back_links(all_kinds, sorted=False)}
-            n2_bck_ids = {n.internal_id for n in n2.get_back_links(all_kinds, sorted=False)}
+            n1_bck_ids = {n.internal_id for n in n1.get_back_links(all_kinds, should_sort=False)}
+            n2_bck_ids = {n.internal_id for n in n2.get_back_links(all_kinds, should_sort=False)}
             self.assertEqual(
                 n1_bck_ids,
                 n2_bck_ids,
@@ -566,7 +566,7 @@ class TestDGraph(unittest.TestCase):
             if node1:
                 key1 = node1.get_key() # Get key here
                 if key1: # Ensure node has a key
-                    links = list(node1.get_forward_links(set(DGraphNodeKind), sorted=False)) # Get neighbor nodes
+                    links = list(node1.get_forward_links(set(DGraphNodeKind), should_sort=False)) # Get neighbor nodes
                     if len(links) > 0:
                          break
             idx1 = random.randint(0, N - 1) # Check full range if starting point failed
