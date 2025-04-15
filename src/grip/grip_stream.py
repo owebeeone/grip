@@ -164,7 +164,7 @@ class GripStreamMux(Generic[DType]):
 
     receiver_loop_error_handler: Callable[[Exception], None] = dtfield(default=lambda msg: ())
     # Queue now holds GripStream instances needing processing
-    queue: asyncio.Queue[GripStream[DType] | object] = dtfield(
+    queue: asyncio.Queue[object] = dtfield(
         default_factory=asyncio.Queue
     )
     streams: list[GripStream[DType]] = dtfield(default_factory=list)
