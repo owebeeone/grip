@@ -3,7 +3,8 @@ import copy
 from typing import Any
 
 # Assuming GripKey is in grip.grip_key
-from grip.grip_key import GripKey
+from grip.grip_base import DuplicateGripKey
+from grip.grip_key import GripKey, GripRegistryImpl
 
 
 # Mock Grip class for testing purposes
@@ -30,7 +31,7 @@ class TestGripKey(unittest.TestCase):
         self.main_key.spec.default = 100
         
         self.key2_name = "my_key2"
-        self.main_key2 = GripKey(self.key2_name, _grip=self.mock_grip)
+        self.main_key2 = GripKey(self.key2_name, grip=self.mock_grip)
         self.pro_key2 = self.main_key2.pro
         self.main_key2.spec.data_type = int
         self.main_key2.spec.default = 200
@@ -100,7 +101,7 @@ class TestGripKey(unittest.TestCase):
         # Create another identical main key
         main_key_2 = GripKey(self.key_name, self.mock_grip)
         # Create a different main key
-        main_key_diff_name = GripKey(_name="other_key", _grip=self.mock_grip)
+        main_key_diff_name = GripKey(name="other_key", grip=self.mock_grip)
         
         # Main keys
         self.assertNotEqual(self.main_key, main_key_2)
@@ -108,6 +109,18 @@ class TestGripKey(unittest.TestCase):
 
         self.assertNotEqual(self.main_key, main_key_diff_name)
         self.assertNotEqual(hash(self.main_key), hash(main_key_diff_name)) # Hash depends only on name
+
+    def test_registry(self):
+        """Test registry of GripKeyMain and GripKeyMain.Prospective."""
+        grip = GripRegistryImpl()
+        grip.add.MyKey(42)
+        self.assertEqual(grip.ref.MyKey.spec.default, 42)
+        self.assertEqual(grip.ref.MyKey.spec.data_type, int)
+        with self.assertRaises(DuplicateGripKey):
+            grip.add.MyKey(42)
+            
+        with self.assertRaises(KeyError):
+            grip.ref.OtherKey
 
 if __name__ == '__main__':
     unittest.main()

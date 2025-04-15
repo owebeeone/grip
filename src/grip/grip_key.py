@@ -1,23 +1,16 @@
 # Internal spec for a GripKey containing its type and default value
 from abc import ABC
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional
 
 from datatrees.datatrees import datatree, dtfield
 
+from grip.grip_base import DuplicateGripKey
 
 class GripRegistry(ABC): 
-    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
-    _tap_definitions: dict[str, 'TapDefinition'] = dtfield(default_factory=dict, repr=False)
-    _tapscopes: dict[str, 'TapScope'] = dtfield(default_factory=dict, repr=False)
-    
+
     def get_grip(self, name: str) -> 'GripKey':
         return self._keys[name]
 
-    def get_tap(self, name: str) -> 'TapDefinition':
-        return self._tap_definitions[name]
-
-    def get_scope(self, name: str) -> 'TapScope':
-        return self._tapscopes[name]
 
 @datatree
 class _GripKeySpec:
@@ -133,4 +126,107 @@ class GripKey:
     
     def __deepcopy__(self, memo: dict) -> 'GripKey':
         return self
+
+# GripRegistry is the registry for all GripKeys. It supports strict, lazy, 
+# and declarative access.
+@datatree
+class GripRegistryImpl(GripRegistry):
+    """
+    Grip is the registry for all GripKeys.
+    It supports strict access (.ref), on-demand creation (.lazy),
+    and declarative definition of keys (.add).
+    """
+    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
+    
+    add: 'GripRegistryImpl.Definer' = dtfield(self_default=lambda self: self.Definer(self))
+    ref: 'GripRegistryImpl.Referrer' = dtfield(self_default=lambda self: self.Referrer(self))
+    lazy: 'GripRegistryImpl.LazyReferrer' = dtfield(self_default=lambda self: self.LazyReferrer(self))
+
+    # Defines new GripKeys. Raises if already defined.
+    @datatree
+    class Definer:
+        """
+        Namespace for defining new GripKeys using attribute access.
+        Example: grip.add.MyKey(42) defines a GripKey called 'MyKey'.
+        """
+        grip_registry: 'GripRegistry'
+        
+        # Define the type and default value for this GripKey (once only).
+        def apply_spec(self, key, default: Any = None, data_type: Optional[type] = None) -> 'GripRegistry':
+            if data_type is None and default is not None:
+                data_type = type(default)
+
+            if key._spec.data_type is not None:
+                raise DuplicateGripKey(f"GripKey '{key.name}' already has a data type")
+
+            key._spec.data_type = data_type
+            key._spec.default = default
+            return key
+
+        def __getattr__(self, name: str):
+            try:
+                attr = self.__getattribute__(name)
+                if attr is not None:
+                    return attr
+            except AttributeError:
+                pass
+
+            if name in self.grip_registry._keys:
+                raise DuplicateGripKey(f"GripKey '{name}' already defined")
+
+            key = GripKey(name=name, grip=self.grip_registry)
+            self.grip_registry._keys[name] = key
+
+            def definer(default: Any = None, data_type: Optional[type] = None):
+                return self.apply_spec(key=key, default=default, data_type=data_type)
+
+            return definer
+
+    # Strict access to only explicitly defined GripKeys
+    @datatree
+    class Referrer:
+        """
+        Namespace for referring to previously defined GripKeys.
+        Raises KeyError if the GripKey is not found.
+        """
+        grip: 'GripRegistry'
+
+        def __getattr__(self, name: str) -> GripKey:
+            try:
+                attr = self.__getattribute__(name)
+                if attr is not None:
+                    return attr
+            except AttributeError:
+                pass
+
+            if name not in self.grip._keys:
+                raise KeyError(f"GripKey '{name}' not found")
+            key = self.grip._keys[name] 
+            if key._spec.data_type is None:
+                # This is a lazy key, it's not defined yet.
+                raise KeyError(f"GripKey '{name}' has is not defined")
+            return key
+
+    # Allows on-demand creation of undefined GripKeys
+    @datatree
+    class LazyReferrer:
+        """
+        Namespace that creates a new GripKey on first access.
+        Use with care—does not enforce upfront declaration.
+        """
+        grip: 'GripRegistry'
+
+        def __getattr__(self, name: str) -> GripKey:
+            try:
+                attr = self.__getattribute__(name)
+                if attr is not None:
+                    return attr
+            except AttributeError:
+                pass
+
+            key = self.grip._keys.get(name)
+            if key is None:
+                key = GripKey(name=name, grip=self.grip)
+                self.grip._keys[name] = key
+            return key
 

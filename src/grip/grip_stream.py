@@ -49,9 +49,6 @@ class AttemptedSendOnInactive(GripBaseException):
     An exception raised when an attempt is made to send data on an inactive multiplexer.
     """
 
-    pass
-
-
 # AttemptedAddStreamToInactive might not be strictly needed if adding is allowed while inactive,
 # but kept for potential future use or stricter policy.
 class AttemptedAddStreamToInactive(GripBaseException):
@@ -59,22 +56,21 @@ class AttemptedAddStreamToInactive(GripBaseException):
     An exception raised when an attempt is made to add a stream to an inactive multiplexer.
     """
 
-    pass
-
-
 class StreamAlreadyAddedError(GripBaseException):
     """
     An exception raised when attempting to add a stream that is already associated with a multiplexer.
     """
 
-    pass
-
+class UnexpectedMessageReceived(GripBaseException):
+    """
+    An exception raised when an unexpected message is received in the mux queue.
+    """
 
 DType = TypeVar("DType")
 _SENTINEL = object()  # Sentinel value to signal queue shutdown
+_DIRTY_STREAMS = object()
 
-
-@datatree
+@datatree(eq=False)
 class GripStream(Generic[DType]):
     """
     Represents a stream of data directed towards a specific processor,
@@ -89,15 +85,16 @@ class GripStream(Generic[DType]):
                          is the same as the last message already in the buffer.
     """
 
+    mux: "GripStreamMux" = dtfield(repr=False)
     processor: Callable[[DType], Awaitable[None]]
     latest_only: bool = dtfield(default=False)
     skip_duplicates: bool = dtfield(default=False)
 
-    mux: Optional["GripStreamMux"] = dtfield(default=None, repr=False)
     # Internal buffer for this stream
     _buffer: Optional[List[DType]] = dtfield(default=None, init=False, repr=False)
     # Lock to protect access to the buffer during send/receive operations
     _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False)
+
     # Internal state to track the last value accepted by send()
     _last_value_sent: Optional[DType] = dtfield(default=None, init=False, repr=False) 
     # Flag to track if _last_value_sent has been set at least once
@@ -116,6 +113,7 @@ class GripStream(Generic[DType]):
         needs_notification = False
         update_buffer_and_notify = True # Assume we proceed unless skipped
 
+        # --- Acquire STREAM lock first --- 
         async with self._lock:
             # 1. Check for duplicates against the *last accepted* value for sending
             if self.skip_duplicates \
@@ -145,17 +143,17 @@ class GripStream(Generic[DType]):
 
                 # 3. Determine if notification is needed (only if buffer was initially None)
                 needs_notification = buffer_was_none
-            
-            # else: If update_buffer_and_notify is False, buffer remains unchanged
-
-        # --- End Lock ---
+        # --- End STREAM Lock ---
 
         if needs_notification:
-            try:
-                self.mux.queue.put_nowait(self)
-            except asyncio.QueueFull:
-                print(f"WARNING: Mux queue full when trying to notify for stream {self}. Data might be delayed/lost.")
+            await self.mux._add_dirty_stream(self)
 
+    # Equality and hash are based on identity.
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return id(self)
 
 @datatree
 class GripStreamMux(Generic[DType]):
@@ -173,6 +171,8 @@ class GripStreamMux(Generic[DType]):
     active: bool = dtfield(default=False)
     _receiver_task: Optional[asyncio.Task] = dtfield(default=None, repr=False)
     queue_backup_metric: int = 0
+    _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False)
+    _dirty_streams: set[GripStream[DType]] = dtfield(default=None, init=False, repr=False)
 
     def activate(self):
         """
@@ -225,7 +225,7 @@ class GripStreamMux(Generic[DType]):
         Add an existing GripStream instance to the multiplexer.
         Prefer using `create_stream` factory method.
         """
-        if stream.mux is not None:
+        if stream.mux not in (None, self):
             # Use the more specific exception
             raise StreamAlreadyAddedError("Stream is already added to a multiplexer")
         if stream not in self.streams:
@@ -287,88 +287,112 @@ class GripStreamMux(Generic[DType]):
         new_stream = GripStream[DType](
             processor=final_processor,
             latest_only=latest_only,
-            skip_duplicates=skip_duplicates
+            skip_duplicates=skip_duplicates,
+            mux=self
         )
         self._add_stream(new_stream)
         return new_stream
 
+    async def _add_dirty_stream(self, stream: GripStream[DType]) -> None:
+        """
+        Add a stream to the set of dirty streams.
+        """
+        put_marker = False
+        
+        async with self._lock: 
+            if self._dirty_streams is None:
+                self._dirty_streams = set()
+                put_marker = True # Signal to put marker AFTER adding stream
+
+            self._dirty_streams.add(stream)
+            
+        if put_marker:
+            # Try putting marker only if the set was just created
+            try:
+                self.queue.put_nowait(_DIRTY_STREAMS)
+            except asyncio.QueueFull:
+                print("WARNING: Mux queue full when trying to notify _DIRTY_STREAMS")
+                # If this fails, the receiver might not wake up. Problematic.
+                # Consider alternative notification or error handling.
+                self._dirty_streams = None # Maybe reset state if notify fails?
+
     async def _receive_loop(self):
         """
-        Internal task that receives ready GripStream instances from the queue,
-        retrieves and clears their buffers, and processes the buffered data.
-        Continues draining the queue after deactivation until empty.
+        Internal task receives _DIRTY_STREAMS marker, processes all streams
+        in the dirty set, and handles shutdown.
         """
         should_stop = False
         try:
             while not should_stop:
-                buffer_to_process: Optional[List[DType]] = None
-                source_stream: Optional[GripStream[DType]] = None
+                streams_to_process_now: set[GripStream[DType]] = set()
                 try:
-                    # Get the stream instance that has data ready
-                    # Use a small timeout to prevent blocking forever if something 
-                    # unexpected happens during shutdown and the queue never empties 
-                    # (though it should).
-                    item = await asyncio.wait_for(self.queue.get(), timeout=1.0) 
+                    msg = await asyncio.wait_for(self.queue.get(), timeout=1.0)
 
-                    if item is _SENTINEL:
-                        # Sentinel received. Stop accepting new work (already done by 
-                        # deactivate) but continue processing items already in the queue.
-                        self.active = False # Ensure flag is false
+                    if msg is _SENTINEL:
+                        self.active = False
                         self.queue.task_done()
-                        # If the queue is now empty, we can prepare to stop.
                         if self.queue.empty():
-                           should_stop = True
-                        continue # Continue loop to check queue again or exit
+                            should_stop = True
+                        continue
 
-                    # Item should be a GripStream instance
-                    if not isinstance(item, GripStream):
-                        print(f"WARNING: Invalid item received in mux queue: {item}")
+                    if msg is _DIRTY_STREAMS:
+                        # --- Atomically get and reset dirty set --- 
+                        async with self._lock: # Use Mux lock
+                            if self._dirty_streams is not None:
+                                streams_to_process_now = self._dirty_streams
+                                self._dirty_streams = None # Reset shared set
+                        # --- End Mux lock --- 
+
+                        self.queue.task_done() 
+                        
+                        # --- Process the retrieved set of streams --- 
+                        # (No Mux lock needed here, uses stream locks)
+                        for source_stream in streams_to_process_now:
+                             # Check if stream is still valid/part of this mux?
+                             # (Could be removed concurrently, though unlikely with current API)
+                             if not isinstance(source_stream, GripStream) or source_stream.mux is not self:
+                                 print(f"WARNING: Stale/invalid stream in dirty set: {source_stream}")
+                                 continue
+                                 
+                             buffer_to_process = None
+                             # --- Atomically get and clear the stream's buffer --- 
+                             async with source_stream._lock: # Use STREAM lock
+                                 buffer_to_process = source_stream._buffer
+                                 source_stream._buffer = None
+                             # --- End Stream Lock --- 
+                             
+                             if buffer_to_process:
+                                 try:
+                                     if len(buffer_to_process) > 1:
+                                         self.queue_backup_metric += len(buffer_to_process) - 1
+                                     for data_item in buffer_to_process:
+                                         await source_stream.processor(data_item)
+                                 except Exception as e:
+                                     self.receiver_loop_error_handler(e)
+                    else:
+                        # Handle unexpected message types
+                        print(f"WARNING: Invalid message type received in mux queue: {msg}")
                         self.queue.task_done()
                         continue
-                        
-                    source_stream = item
-                    
-                    # Atomically get and clear the buffer
-                    async with source_stream._lock:
-                        buffer_to_process = source_stream._buffer
-                        source_stream._buffer = None # Mark buffer as empty
-                    
-                    # Process the retrieved buffer if it wasn't empty
-                    if buffer_to_process:
-                        try:
-                            if len(buffer_to_process) > 1:
-                                self.queue_backup_metric += len(buffer_to_process) - 1
-                            for data_item in buffer_to_process:
-                                await source_stream.processor(data_item) 
-                        except Exception as e:
-                            self.receiver_loop_error_handler(e)
-                    
-                    self.queue.task_done() 
 
                 except asyncio.TimeoutError:
-                    # Timeout waiting for queue item. If mux is inactive, 
-                    # assume queue is drained or stuck, prepare to stop.
                     if not self.active:
-                        # print("Receiver loop timeout while inactive, stopping.")
                         should_stop = True
-                    # If active, maybe just log and continue?
-                    # else: print("Receiver loop timeout while active.")
                     continue
                 except asyncio.CancelledError as e:
                     self.receiver_loop_error_handler(e)
-                    should_stop = True # Exit loop if cancelled
-                    # Do not call task_done() here, cancellation handles it
-                    raise # Re-raise CancelledError
+                    raise # Re-raise
                 except Exception as e:
                      self.receiver_loop_error_handler(e)
-                     # Avoid tight loop on unexpected errors
-                     await asyncio.sleep(0.1) 
+                     await asyncio.sleep(0.1)
                 
-                # Check exit condition after processing or handling exceptions/sentinel
+                # Check exit condition after processing batch or timeout
                 if not self.active and self.queue.empty():
-                    should_stop = True
-                    
+                    # Check queue empty status again *after* processing
+                    async with self._lock: # Ensure check is safe if _add_dirty_stream runs concurrently
+                        if self._dirty_streams is None and self.queue.empty():
+                            should_stop = True
+                            
         finally:
-            # Ensure active is false upon any exit (normal, exception, cancellation)
             self.active = False
             # print("Receiver loop finished.")
