@@ -300,13 +300,14 @@ class DGraphNode(DGraphNodeBase):
     kind: DGraphNodeKind  # Kind is now determined by the key used to create it
     # Field to store the associated application-level key/data object
     application_key: Optional[ApplicationKeyBase] = field(compare=False)
+    sort_rank: float = 1.0  # Used to sort nodes when traversing within a kind
     key_internal_id: int = -1  # -1 indicates no key associated (or key was reaped)
-    forward_links: Set[int] = field(default_factory=set, compare=False)  # Set of target node IDs
-    back_links: Set[int] = field(default_factory=set, compare=False)  # Set of source node IDs
     # NEW: Index stored *on* context nodes (Groups/Queries)
     context_resource_index: Optional[Dict[Tuple[ApplicationKeyBase, DGraphNodeKind], int]] = field(
         default=None, compare=False, repr=False
     )
+    forward_links_by_kind: list[Set[int]] = field(default=None, compare=False)
+    back_links_by_kind: list[Set[int]] = field(default=None, compare=False)
 
     # __slots__ = ['graph', 'internal_id', 'kind', 'key_internal_id', 'forward_links', 'back_links'] # Optional memory optimization
 
@@ -315,6 +316,88 @@ class DGraphNode(DGraphNodeBase):
         if self.internal_id < 0:
             raise ValueError("internal_id must be non-negative")
         # Kind validation could happen here if needed, based on key_internal_id
+    
+    def _get_and_may_init_back_links(self):
+        links = self.back_links_by_kind
+        if links is None:
+            links = [None] * len(DGraphNodeKind)
+            self.back_links_by_kind = links
+        return links
+    
+    def _get_and_may_init_forward_links(self):
+        links = self.forward_links_by_kind
+        if links is None:
+            links = [None] * len(DGraphNodeKind)
+            self.forward_links_by_kind = links
+        return links
+    
+    def add_forward_link(self, other: DGraphNode):
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        forward_links_by_kind = self._get_and_may_init_forward_links()
+        linkset = forward_links_by_kind[kindint]
+        if linkset is None:
+            linkset = set()
+            self.forward_links_by_kind[kindint] = linkset
+        linkset.add(other.internal_id)
+    
+    def remove_forward_link(self, other: DGraphNode):
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        forward_links_by_kind = self._get_and_may_init_forward_links()
+        linkset = forward_links_by_kind[kindint]
+        if linkset is not None:
+            linkset.remove(other.internal_id)
+            
+    def add_back_link(self, other: DGraphNode):
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        back_links_by_kind = self._get_and_may_init_back_links()
+        linkset = back_links_by_kind[kindint]
+        if linkset is None:
+            linkset = set()
+            self.back_links_by_kind[kindint] = linkset
+        linkset.add(other.internal_id)
+        
+    def remove_back_link(self, other: DGraphNode):
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        back_links_by_kind = self._get_and_may_init_back_links()
+        linkset = back_links_by_kind[kindint]
+        if linkset is not None:
+            linkset.remove(other.internal_id)
+            
+    def contains_forward_link(self, other: DGraphNode) -> bool:
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        forward_links_by_kind = self._get_and_may_init_forward_links()
+        linkset = forward_links_by_kind[kindint]
+        return linkset is not None and other.internal_id in linkset
+    
+    def contains_back_link(self, other: DGraphNode) -> bool:
+        kindint = other.kind.value - 1 # Convert to 0-based index
+        back_links_by_kind = self._get_and_may_init_back_links()
+        linkset = back_links_by_kind[kindint]
+        return linkset is not None and other.internal_id in linkset 
+
+    def get_forward_links(self, kinds: set[DGraphNodeKind], sorted: bool = True) -> \
+        Iterable[DGraphNode]:
+        for kindint in sorted([k.value for k in kinds]):
+            forward_links_by_kind = self._get_and_may_init_forward_links()
+            linkset = forward_links_by_kind[kindint]
+            if linkset is not None:
+                linklist = [self.graph.get_node(i) for i in linkset]
+                if sorted:
+                    linklist.sort(key=lambda x: x.sort_rank)
+                for other in linklist:
+                    yield other
+                    
+    def get_back_links(self, kinds: set[DGraphNodeKind], sorted: bool = True) -> \
+        Iterable[DGraphNode]:
+        for kindint in sorted([k.value for k in kinds]):
+            back_links_by_kind = self._get_and_may_init_back_links()
+            linkset = back_links_by_kind[kindint]
+            if linkset is not None:
+                linklist = [self.graph.get_node(i) for i in linkset]
+                if sorted:
+                    linklist.sort(key=lambda x: x.sort_rank)
+                for other in linklist:
+                    yield other
 
     def get_key(self) -> Optional[DGraphNodeKey]:
         """Retrieves the associated key object via the graph's group."""
@@ -330,34 +413,6 @@ class DGraphNode(DGraphNodeBase):
         # print(f"Warning: Node {self.internal_id} has no valid graph reference for key lookup.")
         return None
 
-    def _add_forward_link(self, target_node_id: int):
-        """Internal method to add forward link."""
-        if target_node_id != self.internal_id:  # Prevent self-loops
-            # FIX: Check membership *before* adding, only mark dirty if new
-            if target_node_id not in self.forward_links:
-                self.forward_links.add(target_node_id)
-                self.graph._mark_dirty(self.internal_id)  # Mark dirty only if changed
-
-    def _remove_forward_link(self, target_node_id: int):
-        """Internal method to remove forward link."""
-        if target_node_id in self.forward_links:
-            self.forward_links.remove(target_node_id)
-            self.graph._mark_dirty(self.internal_id)
-
-    def _add_back_link(self, source_node_id: int):
-        """Internal method to add backward link."""
-        if source_node_id != self.internal_id:
-            # FIX: Check membership *before* adding, only mark dirty if new
-            if source_node_id not in self.back_links:
-                self.back_links.add(source_node_id)
-                self.graph._mark_dirty(self.internal_id)  # Mark dirty only if changed
-
-    def _remove_back_link(self, source_node_id: int):
-        """Internal method to remove backward link."""
-        if source_node_id in self.back_links:
-            self.back_links.remove(source_node_id)
-            self.graph._mark_dirty(self.internal_id)
-
     def __repr__(self):
         key_info = f", key_id={self.key_internal_id}" if self.key_internal_id != -1 else ""
         app_key_info = (
@@ -369,8 +424,7 @@ class DGraphNode(DGraphNodeBase):
             else ""
         )
         return (
-            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}{key_info}{app_key_info}{context_index_info}, "
-            f"fwd={sorted(list(self.forward_links))}, bck={sorted(list(self.back_links))})"
+            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}{key_info}{app_key_info}{context_index_info})"
         )
 
     def __hash__(self):
@@ -387,25 +441,13 @@ class DGraphNode(DGraphNodeBase):
     # deepcopy will call __init__ on the copied nodes, and the graph reference
     # should point to the new graph instance found in the memo dictionary.
 
-    def get_neighbors_by_link(self, link_attr: str, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
-        """Helper to get neighbors from forward or backward links, optionally filtered by kind."""
-        link_ids: Set[int] = getattr(self, link_attr, set())
-        if not link_ids:
-            return
-
-        for neighbor_id in link_ids:
-            neighbor_node = self.graph.get_node(neighbor_id)
-            if neighbor_node:
-                if kinds is None or neighbor_node.kind in kinds:
-                    yield neighbor_node
-
     def get_forward_neighbors(self, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
         """Returns an iterable of forward neighbor nodes, optionally filtered by kind."""
-        yield from self.get_neighbors_by_link('forward_links', kinds)
+        yield from self.get_forward_links(kinds=kinds if kinds else set(DGraphNodeKind), sorted=False) # Default to all kinds if None, no sorting needed here
 
     def get_backward_neighbors(self, kinds: Optional[Set[DGraphNodeKind]] = None) -> Iterable["DGraphNode"]:
         """Returns an iterable of backward neighbor nodes, optionally filtered by kind."""
-        yield from self.get_neighbors_by_link('back_links', kinds)
+        yield from self.get_back_links(kinds=kinds if kinds else set(DGraphNodeKind), sorted=False) # Default to all kinds if None, no sorting needed here
 
 
 # --- Directed Graph Definition ---
@@ -564,10 +606,20 @@ class DGraph:
                  del self._key_id_to_node_id[key_internal_id]
 
         # --- Remove connections ---
-        target_ids = list(node_to_remove.forward_links)
-        source_ids = list(node_to_remove.back_links)
-        # ... disconnect from targets ...
+        # Iterate over copies as disconnect_nodes modifies the links
+        for target_node in list(node_to_remove.get_forward_links(set(DGraphNodeKind), sorted=False)):
+             if target_node: # Check if target node still exists
+                try:
+                    self.disconnect_nodes(node_id, target_node.internal_id)
+                except Exception as e:
+                    print(f"Warning: Error disconnecting {node_id} -> {target_node.internal_id} during node removal: {e}")
         # ... disconnect from sources ...
+        for source_node in list(node_to_remove.get_back_links(set(DGraphNodeKind), sorted=False)):
+             if source_node: # Check if source node still exists
+                try:
+                    self.disconnect_nodes(source_node.internal_id, node_id)
+                except Exception as e:
+                    print(f"Warning: Error disconnecting {source_node.internal_id} -> {node_id} during node removal: {e}")
 
         # --- Remove node object and clean dirty set ---
         del self.nodes[node_id]
@@ -587,7 +639,7 @@ class DGraph:
             return  # Or raise appropriate error
 
         # --- Check if already connected ---
-        if target_id in source_node.forward_links:
+        if source_node.contains_forward_link(target_node):
             if VERBOSE:
                 print(
                     f"Info: connect_nodes skipped for {source_id} -> {target_id} (already connected)"
@@ -632,8 +684,11 @@ class DGraph:
             print(
                 f"Connecting {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name})"
             )
-        source_node._add_forward_link(target_id)
-        target_node._add_back_link(source_id)
+        # Use node-based link methods and mark dirty
+        source_node.add_forward_link(target_node)
+        source_node.graph._mark_dirty(source_node.internal_id) # Mark source dirty
+        target_node.add_back_link(source_node)
+        target_node.graph._mark_dirty(target_node.internal_id) # Mark target dirty
 
         # --- Post-Connection Hooks ---
         # These should generally not raise errors, but could log warnings
@@ -657,7 +712,7 @@ class DGraph:
             return  # Or raise
 
         # --- Check if the link actually exists before proceeding ---
-        if target_id not in source_node.forward_links:
+        if not source_node.contains_forward_link(target_node):
             if VERBOSE:
                 print(
                     f"Info: disconnect_nodes skipped for {source_id} -> {target_id} (link does not exist)"
@@ -701,8 +756,11 @@ class DGraph:
             print(
                 f"Disconnecting {source_id} ({source_key.kind.name}) -> {target_id} ({target_key.kind.name})"
             )
-        source_node._remove_forward_link(target_id)
-        target_node._remove_back_link(source_id)
+        # Use node-based link methods and mark dirty
+        source_node.remove_forward_link(target_node)
+        self.graph._mark_dirty(source_node.internal_id) # Mark source dirty
+        target_node.remove_back_link(source_node)
+        self.graph._mark_dirty(target_node.internal_id) # Mark target dirty
 
         # --- Post-Disconnection Hooks ---
         try:
@@ -743,10 +801,11 @@ class DGraph:
             if not node:
                 continue  # Skip if node got removed somehow
 
-            for target_id in node.forward_links:
-                if target_id in in_degree:  # Check if target is also in the subgraph
-                    adj[node_id].append(target_id)
-                    in_degree[target_id] += 1
+            # Iterate through neighbors using get_forward_links
+            for target_node in node.get_forward_links(kinds=set(DGraphNodeKind), sorted=False): # Consider all kinds
+                if target_node and target_node.internal_id in in_degree:  # Check if target is also in the subgraph
+                    adj[node_id].append(target_node.internal_id)
+                    in_degree[target_node.internal_id] += 1
 
         # Initialize queue with nodes having in-degree 0
         queue = deque([node_id for node_id, degree in in_degree.items() if degree == 0])

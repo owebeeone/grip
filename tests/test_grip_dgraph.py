@@ -284,13 +284,21 @@ class TestDGraph(unittest.TestCase):
                 n2.key_internal_id,
                 f"Node {node_id} key_id mismatch {msg or ''}",
             )
+            # Compare link structure using get_forward_links and get_back_links
+            all_kinds = set(DGraphNodeKind)
+            n1_fwd_ids = {n.internal_id for n in n1.get_forward_links(all_kinds, sorted=False)}
+            n2_fwd_ids = {n.internal_id for n in n2.get_forward_links(all_kinds, sorted=False)}
             self.assertEqual(
-                n1.forward_links,
-                n2.forward_links,
+                n1_fwd_ids,
+                n2_fwd_ids,
                 f"Node {node_id} forward links mismatch {msg or ''}",
             )
+            n1_bck_ids = {n.internal_id for n in n1.get_back_links(all_kinds, sorted=False)}
+            n2_bck_ids = {n.internal_id for n in n2.get_back_links(all_kinds, sorted=False)}
             self.assertEqual(
-                n1.back_links, n2.back_links, f"Node {node_id} back links mismatch {msg or ''}"
+                n1_bck_ids,
+                n2_bck_ids,
+                f"Node {node_id} back links mismatch {msg or ''}"
             )
             self.assertIs(n1.graph, g1, f"Node {node_id} in g1 should point to g1 {msg or ''}")
             self.assertIs(n2.graph, g2, f"Node {node_id} in g2 should point to g2 {msg or ''}")
@@ -377,8 +385,9 @@ class TestDGraph(unittest.TestCase):
         # Connect C1 -> P1
         connected = wrap.connect_nodes(key_c1, key_p1)
         self.assertTrue(connected)
-        self.assertIn(node_p1.internal_id, node_c1.forward_links)
-        self.assertIn(node_c1.internal_id, node_p1.back_links)
+        # Use contains_forward_link and contains_back_link
+        self.assertTrue(node_c1.contains_forward_link(node_p1))
+        self.assertTrue(node_p1.contains_back_link(node_c1))
         self.assertEqual(graph.dirty_node_ids, {node_c1.internal_id, node_p1.internal_id})
         graph.clear_dirty()
 
@@ -390,8 +399,9 @@ class TestDGraph(unittest.TestCase):
         # Disconnect C1 -> P1
         disconnected = wrap.disconnect_nodes(key_c1, key_p1)
         self.assertTrue(disconnected)
-        self.assertNotIn(node_p1.internal_id, node_c1.forward_links)
-        self.assertNotIn(node_c1.internal_id, node_p1.back_links)
+        # Use contains_forward_link and contains_back_link
+        self.assertFalse(node_c1.contains_forward_link(node_p1))
+        self.assertFalse(node_p1.contains_back_link(node_c1))
         self.assertEqual(graph.dirty_node_ids, {node_c1.internal_id, node_p1.internal_id})
         graph.clear_dirty()
 
@@ -439,7 +449,9 @@ class TestDGraph(unittest.TestCase):
             self.assertIn(node_id_p1, graph.dirty_node_ids)
             node_p1_after = graph.get_node(node_id_p1)
             self.assertIsNotNone(node_p1_after)
-            self.assertNotIn(node_id_c1, node_p1_after.back_links)
+            # Check back links using get_back_links for the specific kind
+            consumer_back_links = list(node_p1_after.get_back_links(kinds={DGraphNodeKind.CONSUMER}))
+            self.assertEqual(len(consumer_back_links), 0, "Backlink from reaped node was not removed")
 
     def test_reversibility(self):
         """Test adding and removing connections leaves the graph unchanged."""
@@ -468,8 +480,8 @@ class TestDGraph(unittest.TestCase):
             key1, key2 = keys[idx1], keys[idx2]
             node1, node2 = wrap.get_node(key1), wrap.get_node(key2)
 
-            # Check if connection already exists
-            if node2.internal_id not in node1.forward_links:
+            # Check if connection already exists using contains_forward_link
+            if not node1.contains_forward_link(node2):
                 if wrap.connect_nodes(key1, key2):
                     added_connections.add((key1, key2))
 
@@ -545,14 +557,32 @@ class TestDGraph(unittest.TestCase):
 
         # Add a cycle
         idx1 = N // 2
+        node1 = None
+        key1 = None
+        links = []
+        # Find a node with forward links safely
         while True:
-            links = list(graph.get_node(idx1).forward_links)
-            if len(links) > 0:
-                break
-            idx1 = random.randint(0, N // 2)
-        idx2 = random.choice(links)
-        key1, key2 = keys[idx1], keys[idx2]
+            node1 = graph.get_node(idx1) # Get the node object
+            if node1:
+                key1 = node1.get_key() # Get key here
+                if key1: # Ensure node has a key
+                    links = list(node1.get_forward_links(set(DGraphNodeKind), sorted=False)) # Get neighbor nodes
+                    if len(links) > 0:
+                         break
+            idx1 = random.randint(0, N - 1) # Check full range if starting point failed
+
+        self.assertTrue(len(links) > 0, "Could not find a node with forward links")
+        self.assertIsNotNone(key1, "Source node for cycle creation has no key")
+
+        # Choose a target node and get its key
+        node2 = random.choice(links)
+        key2 = node2.get_key() # Key of the target node
+
+        self.assertIsNotNone(key2, "Target node for cycle creation has no key")
+
+        # Connect target back to source
         wrap.connect_nodes(key2, key1)
+        # REMOVED: Old link finding logic
 
         # Time cyclic check
         start_time = time.perf_counter()
