@@ -80,47 +80,81 @@ class GripStream(Generic[DType]):
     Represents a stream of data directed towards a specific processor,
     managed by a GripStreamMux. Buffers data internally and notifies mux.
     Processor MUST be awaitable.
+
+    Args:
+        processor: The awaitable function to process incoming data.
+        latest_only: If True, only keep the latest message, discarding previous ones
+                     in the buffer upon receiving a new message.
+        skip_duplicates: If True, do not store or notify if the incoming message
+                         is the same as the last message already in the buffer.
     """
 
     processor: Callable[[DType], Awaitable[None]]
+    latest_only: bool = dtfield(default=False)
+    skip_duplicates: bool = dtfield(default=False)
+
     mux: Optional["GripStreamMux"] = dtfield(default=None, repr=False)
     # Internal buffer for this stream
     _buffer: Optional[List[DType]] = dtfield(default=None, init=False, repr=False)
     # Lock to protect access to the buffer during send/receive operations
     _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False)
+    # Internal state to track the last value accepted by send()
+    _last_value_sent: Optional[DType] = dtfield(default=None, init=False, repr=False) 
+    # Flag to track if _last_value_sent has been set at least once
+    _has_sent_value: bool = dtfield(default=False, init=False, repr=False) 
 
     async def send(self, data: DType) -> None:
         """
-        Add data to the stream's internal buffer.
-        If the buffer was previously empty (None), notify the multiplexer.
+        Add data to the stream's internal buffer according to options.
+        Skips if skip_duplicates is True and data matches the last sent value.
+        Notify the multiplexer if the buffer transitions from empty to non-empty.
         Raises AttemptedSendOnInactive if the multiplexer is not active.
         """
         if self.mux is None or not self.mux.active:
             raise AttemptedSendOnInactive("Multiplexer is not active or stream not added")
-        
+
         needs_notification = False
+        update_buffer_and_notify = True # Assume we proceed unless skipped
+
         async with self._lock:
-            if self._buffer is None:
-                self._buffer = []
-                needs_notification = True
-            self._buffer.append(data)
+            # 1. Check for duplicates against the *last accepted* value for sending
+            if self.skip_duplicates \
+                and self._has_sent_value \
+                and self._last_value_sent == data:
+                update_buffer_and_notify = False # Skip update and notification
             
+            if update_buffer_and_notify:
+                # Mark that we have now sent a value
+                self._has_sent_value = True 
+                # Store the latest value intended for processing
+                self._last_value_sent = data 
+
+                buffer_was_none = self._buffer is None
+
+                # 2. Update buffer logic
+                if self.latest_only:
+                    # Always store only the latest value
+                    self._buffer = [data]
+                else:
+                    # Standard buffering: create if None, else append
+                    if buffer_was_none:
+                        self._buffer = [data]
+                    else:
+                        # Buffer is guaranteed to be a list here
+                        self._buffer.append(data)
+
+                # 3. Determine if notification is needed (only if buffer was initially None)
+                needs_notification = buffer_was_none
+            
+            # else: If update_buffer_and_notify is False, buffer remains unchanged
+
+        # --- End Lock ---
+
         if needs_notification:
-            # Put self onto the queue to signal data is ready
-            # Use put_nowait as send is often called from sync contexts 
-            # or tasks that shouldn't block on the queue put.
-            # Handle QueueFull exception if necessary, though less likely with 
-            # single item notifications per stream burst.
             try:
-                self.mux.queue.put_nowait(self) 
+                self.mux.queue.put_nowait(self)
             except asyncio.QueueFull:
-                # This case is less likely now, but could happen if many streams 
-                # become ready simultaneously and the receiver is slow. 
-                # How to handle? Log? Drop? Retry? 
-                # For now, let's log and potentially drop/re-raise.
                 print(f"WARNING: Mux queue full when trying to notify for stream {self}. Data might be delayed/lost.")
-                # Optionally re-raise or implement retry logic
-                # raise # Or: await self.mux.queue.put(self) # If send itself becomes async
 
 
 @datatree
@@ -198,38 +232,64 @@ class GripStreamMux(Generic[DType]):
             stream.mux = self
             self.streams.append(stream)
 
-    # Overload signature for async processors
+    # Update overloads and implementation for create_stream
     @overload
-    def create_stream(self, processor: Callable[[DType], Awaitable[None]]) -> GripStream[DType]:
+    def create_stream(
+        self,
+        processor: Callable[[DType], Awaitable[None]],
+        *, # Make options keyword-only
+        latest_only: bool = False,
+        skip_duplicates: bool = False
+    ) -> GripStream[DType]:
         ...
 
-    # Overload signature for sync processors
     @overload
-    def create_stream(self, processor: Callable[[DType], None]) -> GripStream[DType]:
+    def create_stream(
+        self,
+        processor: Callable[[DType], None],
+        *, # Make options keyword-only
+        latest_only: bool = False,
+        skip_duplicates: bool = False
+    ) -> GripStream[DType]:
         ...
 
-    # Single implementation handling both cases
-    def create_stream(self, processor: Callable[..., Any]) -> GripStream[DType]:
+    # Single implementation handling both cases and new options
+    def create_stream(
+        self,
+        processor: Callable[..., Any],
+        *,
+        latest_only: bool = False,
+        skip_duplicates: bool = False
+    ) -> GripStream[DType]:
         """
-        Factory method to create a new GripStream, add it to this mux,
+        Factory method to create a new GripStream with options, add it to this mux,
         and set its processor. Supports both sync and async processors.
-        Returns the created stream.
+
+        Args:
+            processor: The sync or async processor function.
+            latest_only: Pass-through to GripStream.
+            skip_duplicates: Pass-through to GripStream.
+
+        Returns:
+            The created stream.
         """
         final_processor: Callable[[DType], Awaitable[None]]
 
         if inspect.iscoroutinefunction(processor):
-            # If the provided processor is already async, use it directly
             final_processor = processor
         else:
-            # If it's sync, wrap it in an async function
             async def async_wrapper(data: DType):
                 processor(data)
-                # Yield control briefly to avoid tight loop
                 await asyncio.sleep(0)
             final_processor = async_wrapper
 
-        new_stream = GripStream[DType](processor=final_processor)
-        self._add_stream(new_stream) # Sets mux reference and adds to list
+        # Pass options to GripStream constructor
+        new_stream = GripStream[DType](
+            processor=final_processor,
+            latest_only=latest_only,
+            skip_duplicates=skip_duplicates
+        )
+        self._add_stream(new_stream)
         return new_stream
 
     async def _receive_loop(self):

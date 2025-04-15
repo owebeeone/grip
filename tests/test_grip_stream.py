@@ -338,6 +338,167 @@ async def test_multi_sender_multi_stream(
             f"Unexpected: {sorted(list(unexpected)) if unexpected else 'None'}."
         )
 
+
+@pytest.mark.asyncio
+async def test_stream_latest_only():
+    """Verify latest_only=True keeps only the last message."""
+    mux = GripStreamMux[int]()
+    received_items = []
+
+    async def processor(data: int):
+        received_items.append(data)
+        await asyncio.sleep(0.01) # Add delay to allow sends to queue up
+
+    # Create stream with latest_only=True
+    stream = mux.create_stream(processor, latest_only=True)
+    mux.activate()
+
+    # Send multiple items quickly
+    await stream.send(1)
+    await stream.send(2)
+    await stream.send(3)
+
+    # Allow time for receiver loop to potentially process notification
+    await asyncio.sleep(0.05)
+
+    # Send final item
+    await stream.send(4)
+
+    # Allow ample time for final processing
+    await asyncio.sleep(0.1)
+
+    mux.deactivate()
+    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    assert success is True
+    assert exc is None
+
+    # Only the very last item sent should have been processed
+    assert received_items == [4], f"Expected only [4], got {received_items}"
+    # Check internal buffer state (optional, implementation detail test)
+    async with stream._lock:
+        assert stream._buffer is None or stream._buffer == [], "Buffer should be empty or None after processing"
+
+
+@pytest.mark.asyncio
+async def test_stream_skip_duplicates():
+    """Verify skip_duplicates=True prevents processing consecutive identical messages."""
+    mux = GripStreamMux[str]()
+    received_items = []
+    processor_call_count = 0
+
+    async def processor(data: str):
+        nonlocal processor_call_count
+        processor_call_count += 1
+        received_items.append(data)
+        await asyncio.sleep(0.001)
+
+    # Create stream with skip_duplicates=True
+    stream = mux.create_stream(processor, skip_duplicates=True)
+    mux.activate()
+
+    # Send sequence with duplicates
+    await stream.send("A")
+    await stream.send("A") # Should be skipped
+    await stream.send("B")
+    await stream.send("B") # Should be skipped
+    await stream.send("B") # Should be skipped
+    await stream.send("A") # Different from last, should be sent
+    await stream.send("C")
+    await stream.send("C") # Should be skipped
+
+    # Allow time for processing
+    await asyncio.sleep(0.1)
+
+    mux.deactivate()
+    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    assert success is True
+    assert exc is None
+
+    # Check received items and processor calls
+    expected_items = ["A", "B", "A", "C"]
+    assert received_items == expected_items, f"Expected {expected_items}, got {received_items}"
+    assert processor_call_count == len(expected_items), f"Expected processor calls {len(expected_items)}, got {processor_call_count}"
+    # Check internal buffer state (optional)
+    async with stream._lock:
+        assert stream._buffer is None or stream._buffer == [], "Buffer should be empty or None after processing"
+
+
+@pytest.mark.asyncio
+async def test_stream_latest_only_and_skip_duplicates():
+    """Verify interaction of latest_only and skip_duplicates."""
+    mux = GripStreamMux[str]()
+    received_items = []
+    processor_call_count = 0
+
+    async def processor(data: str):
+        nonlocal processor_call_count
+        processor_call_count += 1
+        received_items.append(data)
+        # Simulate some processing time
+        await asyncio.sleep(0.01)
+
+    # Create stream with BOTH options enabled
+    stream = mux.create_stream(processor, latest_only=True, skip_duplicates=True)
+    mux.activate()
+
+    # --- Send sequence --- 
+    print("Sending A (1st)")
+    await stream.send("A") # Should be sent (first item)
+    await asyncio.sleep(0.001) # Brief pause
+
+    print("Sending A (2nd) - should be skipped")
+    await stream.send("A") # Duplicate of last sent, skip
+    await asyncio.sleep(0.001)
+
+    print("Sending B (1st)")
+    await stream.send("B") # New value, should be sent
+    await asyncio.sleep(0.05) # Longer pause - allow A to potentially process
+
+    print("Sending C (1st)")
+    await stream.send("C") # New value, replaces B due to latest_only
+                           # Should be sent eventually
+    await asyncio.sleep(0.001)
+
+    print("Sending C (2nd) - should be skipped")
+    await stream.send("C") # Duplicate of last sent (C), skip
+    await asyncio.sleep(0.001)
+
+    print("Sending D (1st)")
+    await stream.send("D") # New value, replaces C due to latest_only
+                           # Should be sent eventually
+
+    # Allow ample time for the receiver loop to process the final state
+    await asyncio.sleep(0.1)
+
+    mux.deactivate()
+    success, exc = await mux.wait_until_stopped(timeout=2.0) # Increased timeout just in case
+    assert success is True
+    assert exc is None
+
+    # --- Verification --- 
+    # Expected sequence: 
+    # - A is sent initially.
+    # - A (2nd) is skipped.
+    # - B is sent, replaces A if A wasn't processed yet.
+    # - C is sent, replaces B if B wasn't processed yet.
+    # - C (2nd) is skipped.
+    # - D is sent, replaces C if C wasn't processed yet.
+    # Because latest_only=True, only the *last* non-skipped value processed matters.
+    # Processor delays ensure some intermediate values might get processed.
+    
+    print(f"Received Items: {received_items}")
+    print(f"Processor Calls: {processor_call_count}")
+
+    # Crucially, even if A, B, C were processed, the final state processed MUST be D
+    # because latest_only ensures only the last value overwrites previous ones in the buffer.
+    # However, the processor runs for each *non-skipped* value that gets scheduled.
+    expected_values_processed = ["A", "B", "C", "D"]
+    assert received_items == expected_values_processed, \
+        f"Expected processed items {expected_values_processed}, got {received_items}"
+    assert processor_call_count == len(expected_values_processed), \
+        f"Expected {len(expected_values_processed)} processor calls, got {processor_call_count}"
+
+
 # Keep or remove the main block as needed
 if __name__ == "__main__":
     asyncio.run(test_multi_sender_multi_stream())
