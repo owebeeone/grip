@@ -122,5 +122,31 @@ class TestGripKey(unittest.TestCase):
         with self.assertRaises(KeyError):
             grip.ref.OtherKey
 
+        lazy_key = grip.lazy.OtherKey
+        self.assertEqual(lazy_key.spec.default, None)
+        self.assertEqual(lazy_key.spec.data_type, None)
+        
+    def test_accessors(self):
+        """Test accessors of GripRegistryImpl."""
+        grip = GripRegistryImpl()
+        grip.add("MyKey", 42, float)
+        self.assertEqual(grip.ref("MyKey").spec.default, 42)
+        self.assertEqual(grip.ref("MyKey").spec.data_type, float)
+        
+        lazy_key = grip.lazy.OtherKey
+        self.assertEqual(lazy_key, grip.lazy("OtherKey"))
+        self.assertEqual(grip.lazy("OtherKey").spec.default, None)
+        self.assertEqual(grip.lazy("OtherKey").spec.data_type, None)
+        
+        with self.assertRaises(KeyError):
+            grip.ref("OtherKey")
+            
+        grip.add("OtherKey", 42, float)
+        self.assertEqual(grip.lazy("OtherKey").spec.default, 42)
+        self.assertEqual(grip.lazy("OtherKey").spec.data_type, float)
+        
+        self.assertEqual(grip.ref.OtherKey, grip.lazy("OtherKey"))
+        
+
 if __name__ == '__main__':
     unittest.main()

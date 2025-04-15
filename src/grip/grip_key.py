@@ -1,15 +1,29 @@
 # Internal spec for a GripKey containing its type and default value
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Optional
 
 from datatrees.datatrees import datatree, dtfield
 
 from grip.grip_base import DuplicateGripKey
 
+@datatree
 class GripRegistry(ABC): 
-
+    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
+    
     def get_grip(self, name: str) -> 'GripKey':
         return self._keys[name]
+
+    @abstractmethod
+    def add(self, name: str, default: Any = None, data_type: type | None = None) -> 'GripKey':
+        pass
+
+    @abstractmethod
+    def ref(self, name: str) -> 'GripKey':
+        pass
+    
+    @abstractmethod
+    def lazy(self, name: str) -> 'GripKey':
+        pass
 
 
 @datatree
@@ -136,7 +150,6 @@ class GripRegistryImpl(GripRegistry):
     It supports strict access (.ref), on-demand creation (.lazy),
     and declarative definition of keys (.add).
     """
-    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
     
     add: 'GripRegistryImpl.Definer' = dtfield(self_default=lambda self: self.Definer(self))
     ref: 'GripRegistryImpl.Referrer' = dtfield(self_default=lambda self: self.Referrer(self))
@@ -162,6 +175,18 @@ class GripRegistryImpl(GripRegistry):
             key._spec.data_type = data_type
             key._spec.default = default
             return key
+        
+        def _insert_key(self, name: str):
+            if name in self.grip_registry._keys \
+                and self.grip_registry._keys[name]._spec.data_type is not None:
+                raise DuplicateGripKey(f"GripKey '{name}' already defined")
+            key = GripKey(name=name, grip=self.grip_registry)
+            self.grip_registry._keys[name] = key
+            return key
+
+        def __call__(self, name: str, default: Any = None, data_type: type | None = None) -> 'GripRegistryImpl.Definer':
+            key = self._insert_key(name)
+            return self.apply_spec(key, default, data_type)
 
         def __getattr__(self, name: str):
             try:
@@ -170,12 +195,8 @@ class GripRegistryImpl(GripRegistry):
                     return attr
             except AttributeError:
                 pass
-
-            if name in self.grip_registry._keys:
-                raise DuplicateGripKey(f"GripKey '{name}' already defined")
-
-            key = GripKey(name=name, grip=self.grip_registry)
-            self.grip_registry._keys[name] = key
+            
+            key = self._insert_key(name)
 
             def definer(default: Any = None, data_type: Optional[type] = None):
                 return self.apply_spec(key=key, default=default, data_type=data_type)
@@ -190,6 +211,18 @@ class GripRegistryImpl(GripRegistry):
         Raises KeyError if the GripKey is not found.
         """
         grip: 'GripRegistry'
+        
+        def get(self, name: str) -> GripKey:
+            if name not in self.grip._keys:
+                raise KeyError(f"GripKey '{name}' not found")
+            key = self.grip._keys[name] 
+            if key._spec.data_type is None:
+                # This is a lazy key, it's not defined yet.
+                raise KeyError(f"GripKey '{name}' has is not defined")
+            return key
+        
+        def __call__(self, name: str) -> GripKey:
+            return self.get(name)
 
         def __getattr__(self, name: str) -> GripKey:
             try:
@@ -198,14 +231,8 @@ class GripRegistryImpl(GripRegistry):
                     return attr
             except AttributeError:
                 pass
+            return self.get(name)
 
-            if name not in self.grip._keys:
-                raise KeyError(f"GripKey '{name}' not found")
-            key = self.grip._keys[name] 
-            if key._spec.data_type is None:
-                # This is a lazy key, it's not defined yet.
-                raise KeyError(f"GripKey '{name}' has is not defined")
-            return key
 
     # Allows on-demand creation of undefined GripKeys
     @datatree
@@ -215,6 +242,16 @@ class GripRegistryImpl(GripRegistry):
         Use with care—does not enforce upfront declaration.
         """
         grip: 'GripRegistry'
+        
+        def get(self, name: str) -> GripKey:
+            key = self.grip._keys.get(name)
+            if key is None:
+                key = GripKey(name=name, grip=self.grip)
+                self.grip._keys[name] = key
+            return key
+        
+        def __call__(self, name: str) -> GripKey:
+            return self.get(name)
 
         def __getattr__(self, name: str) -> GripKey:
             try:
@@ -223,10 +260,6 @@ class GripRegistryImpl(GripRegistry):
                     return attr
             except AttributeError:
                 pass
+            return self.get(name)
 
-            key = self.grip._keys.get(name)
-            if key is None:
-                key = GripKey(name=name, grip=self.grip)
-                self.grip._keys[name] = key
-            return key
 
