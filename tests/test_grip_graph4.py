@@ -41,23 +41,23 @@ class TestDGraphConstraints(unittest.TestCase):
         """Test connections that should be allowed by Grip constraints."""
         # Consumer -> Producer
         self.wrap.connect_nodes(self.key_c1, self.key_p1)
-        self.assertIn(self.node_p1.internal_id, self.node_c1.forward_links)
-        self.assertIn(self.node_c1.internal_id, self.node_p1.back_links)
+        self.assertTrue(self.node_c1.contains_forward_link(self.node_p1))
+        self.assertTrue(self.node_p1.contains_back_link(self.node_c1))
 
         # Consumer -> Query
         self.wrap.connect_nodes(self.key_c1, self.key_q1)
-        self.assertIn(self.node_q1.internal_id, self.node_c1.forward_links)
-        self.assertIn(self.node_c1.internal_id, self.node_q1.back_links)
+        self.assertTrue(self.node_c1.contains_forward_link(self.node_q1))
+        self.assertTrue(self.node_q1.contains_back_link(self.node_c1))
 
         # Query -> Producer
         self.wrap.connect_nodes(self.key_q1, self.key_p1)
-        self.assertIn(self.node_p1.internal_id, self.node_q1.forward_links)
-        self.assertIn(self.node_q1.internal_id, self.node_p1.back_links)
+        self.assertTrue(self.node_q1.contains_forward_link(self.node_p1))
+        self.assertTrue(self.node_p1.contains_back_link(self.node_q1))
 
         # Group -> Group
         self.wrap.connect_nodes(self.key_g1, self.key_g2)
-        self.assertIn(self.node_g2.internal_id, self.node_g1.forward_links)
-        self.assertIn(self.node_g1.internal_id, self.node_g2.back_links)
+        self.assertTrue(self.node_g1.contains_forward_link(self.node_g2))
+        self.assertTrue(self.node_g2.contains_back_link(self.node_g1))
 
     def test_disallowed_source_initiation(self):
         """Test cases where the source node type cannot initiate the connection."""
@@ -90,13 +90,11 @@ class TestDGraphConstraints(unittest.TestCase):
         self.wrap.disconnect_nodes(self.key_c1, self.key_q1)  # Disconnect C->Q
 
         # Verify disconnection (check a few representative ones)
-        self.assertNotIn(self.node_p1.internal_id, self.node_c1.forward_links)
-        self.assertNotIn(self.node_c1.internal_id, self.node_p1.back_links)
-        self.assertNotIn(self.node_g2.internal_id, self.node_g1.forward_links)
-        self.assertNotIn(
-            self.node_q1.internal_id, self.node_c1.forward_links
-        )  # Verify C->Q disconnect
-        self.assertNotIn(self.node_c1.internal_id, self.node_q1.back_links)
+        self.assertFalse(self.node_c1.contains_forward_link(self.node_p1))
+        self.assertFalse(self.node_p1.contains_back_link(self.node_c1))
+        self.assertFalse(self.node_g1.contains_forward_link(self.node_g2))
+        self.assertFalse(self.node_c1.contains_forward_link(self.node_q1))
+        self.assertFalse(self.node_q1.contains_back_link(self.node_c1))
 
     def test_context_uniqueness_constraint(self):
         """Test uniqueness of (app_key, kind) within a Group/Query context."""
@@ -117,8 +115,8 @@ class TestDGraphConstraints(unittest.TestCase):
 
         # 1. Connect first producer P_unique_1 -> G1 (Allowed by Producer, Checked by Group)
         self.wrap.connect_nodes(key_p_unique_1, self.key_g1)
-        self.assertIn(self.node_g1.internal_id, node_p_unique_1.forward_links)  # P -> G link
-        self.assertIn(node_p_unique_1.internal_id, self.node_g1.back_links)  # G <- P link
+        self.assertTrue(node_p_unique_1.contains_forward_link(self.node_g1))
+        self.assertTrue(self.node_g1.contains_back_link(node_p_unique_1))
         # Verify G1's context index
         expected_index_key_p = (app_key_unique, DGraphNodeKind.PRODUCER)
         self.assertIsNotNone(self.node_g1.context_resource_index)
