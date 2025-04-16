@@ -6,25 +6,7 @@ from datatrees.datatrees import datatree, dtfield
 
 from grip.grip_base import DuplicateGripKey
 from grip.grip_graph import ApplicationKeyBase
-
-@datatree
-class GripRegistry(ABC): 
-    _keys: dict[str, 'GripKey'] = dtfield(default_factory=dict, repr=False)
-    
-    def get_grip(self, name: str) -> 'GripKey':
-        return self._keys[name]
-
-    @abstractmethod
-    def add(self, name: str, default: Any = None, data_type: type | None = None) -> 'GripKey':
-        pass
-
-    @abstractmethod
-    def ref(self, name: str) -> 'GripKey':
-        pass
-    
-    @abstractmethod
-    def lazy(self, name: str) -> 'GripKey':
-        pass
+from grip.grip_interfaces import GripRegistry
 
 
 @datatree
