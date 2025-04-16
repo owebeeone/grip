@@ -5,6 +5,7 @@ from typing import Any, ClassVar, Optional
 from datatrees.datatrees import datatree, dtfield
 
 from grip.grip_base import DuplicateGripKey
+from grip.grip_graph import ApplicationKeyBase
 
 @datatree
 class GripRegistry(ABC): 
@@ -39,7 +40,7 @@ class _GripKeySpec:
 # GripKey is an identifier for a value managed by GRIP.
 # It is bound to a parent Grip and contains type/default spec.
 @datatree(frozen=True, init=False, slots=True)
-class GripKey:
+class GripKey(ApplicationKeyBase):
     """
     GripKey is an identifier for a value managed by GRIP.
     It is bound to a parent Grip and contains type/default spec.

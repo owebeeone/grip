@@ -1,3 +1,5 @@
+from abc import ABC, abstractmethod
+from enum import Enum, auto
 from grip.grip_dgraph import (
     ApplicationKeyBase,
     DGraphNodeKey,
@@ -10,7 +12,7 @@ from grip.grip_dgraph import (
     DGraphWrap,
 )
 from dataclasses import dataclass
-from typing import Any, Set, Optional
+from typing import Any, Iterator, Set, Optional
 
 
 # Define a custom exception for constraint violations
@@ -260,15 +262,55 @@ class QueryConstraints(GroupQueryConstraints):
 # Singleton instance
 _query_constraints = QueryConstraints()
 
+class GraphPhase(Enum):
+    """
+    A GraphPhase is a phase of a graph.
+    """
+    REGULAR = auto()
+    MATCHING = auto()
 
-# --- Update Key Definitions to include constraints ---
+
+class GraphAccessor(ABC):
+    """
+    A GraphAccessor is a class that can access a graph.
+    """
+    
+
+    @abstractmethod
+    def get_graph(self, phase: GraphPhase = GraphPhase.REGULAR) -> DGraph:
+        """
+        Get the graph for a given phase.
+        """
+        pass
 
 
-@dataclass(frozen=True, order=True)
+class GraphNodeAccessor(DGraphNodeKey, ABC):
+    """
+    A GraphNodeAccessor is a class that can access a node in a graph.
+    """
+    
+    @property
+    @abstractmethod
+    def graph_accessor(self) -> GraphAccessor:
+        """
+        Get the graph accessor.
+        """
+        pass
+
+    
+    @abstractmethod
+    def get_forward(self, 
+                    kinds: DGraphNodeKind, 
+                    sorted: bool = False,
+                    phase: GraphPhase = GraphPhase.REGULAR) -> Iterator[DGraphNodeKey]:
+        """
+        Get all nodes of a given kind that can be reached from the current node.
+        """
+        
+
+@dataclass
 class GroupKey(DGraphNodeKey):
     """Key representing a GROUP node within GripGraph4."""
-
-    key_data: Any
 
     @property
     def kind(self) -> DGraphNodeKind:
@@ -279,12 +321,9 @@ class GroupKey(DGraphNodeKey):
         return _group_constraints
 
 
-@dataclass(frozen=True, order=True)
+@dataclass
 class ProducerKey(DGraphNodeKey):
     """Key representing a PRODUCER node within GripGraph4."""
-
-    key_data: Any
-    app_key: ApplicationKeyBase
 
     @property
     def kind(self) -> DGraphNodeKind:
@@ -294,17 +333,11 @@ class ProducerKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _producer_constraints
 
-    @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
 
 
-@dataclass(frozen=True, order=True)
+@dataclass
 class ConsumerKey(DGraphNodeKey):
     """Key representing a CONSUMER node within GripGraph4."""
-
-    key_data: Any
-    app_key: ApplicationKeyBase
 
     @property
     def kind(self) -> DGraphNodeKind:
@@ -314,16 +347,10 @@ class ConsumerKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _consumer_constraints
 
-    @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
 
-
-@dataclass(frozen=True, order=True)
+@dataclass
 class QueryKey(DGraphNodeKey):
     """Key representing a QUERY node within GripGraph4."""
-
-    key_data: Any
 
     @property
     def kind(self) -> DGraphNodeKind:

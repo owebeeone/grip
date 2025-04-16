@@ -1,7 +1,7 @@
 from __future__ import annotations
 import weakref
 from dataclasses import dataclass, field
-from typing import Optional, Any, Dict, Set, List, Type, Iterable, Tuple
+from typing import Iterator, Optional, Any, Dict, Set, List, Type, Iterable, Tuple
 from enum import Enum, auto
 from collections import deque  # For BFS algorithm
 import copy  # Import the copy module
@@ -18,15 +18,14 @@ class ApplicationKeyBase(ABC):
     Ensures these objects are not deepcopied with the graph structure.
     """
 
-    # Add common abstract methods/properties if needed by constraints or other generic logic
-    # ...
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
 
     def __deepcopy__(self, memo: Dict[int, Any]) -> "ApplicationKeyBase":
         """Application keys are treated as immutable references; do not copy."""
         return self
-
-
-# --- Node Kind Enum ---
 
 
 class DGraphNodeKind(Enum):
@@ -288,10 +287,7 @@ class DGraphGroup:
         return dead_key_ids
 
 
-# --- Graph Node Definition ---
-
-
-@dataclass(eq=False)  # Equality should be based on ID via DGraph, not fields
+@dataclass(eq=False, order=False)
 class DGraphNode(DGraphNodeBase):
     """Represents a node within the DGraph."""
 
@@ -460,8 +456,6 @@ class DGraphNode(DGraphNodeBase):
         yield from self.get_back_links(kinds=kinds if kinds else set(DGraphNodeKind), should_sort=False) # Default to all kinds if None, no sorting needed here
 
 
-# --- Directed Graph Definition ---
-
 
 @dataclass
 class DGraph:
@@ -551,9 +545,12 @@ class DGraph:
         check_key_id = self.group.get_id_from_key(key)
         if check_key_id is not None:
             existing_node_id_by_keyid = self._key_id_to_node_id.get(check_key_id)
-            if existing_node_id_by_keyid is not None and existing_node_id_by_keyid in self.nodes:
+            if existing_node_id_by_keyid is not None \
+                and existing_node_id_by_keyid in self.nodes:
                 raise ValueError(
-                    f"DGraphNodeKey {key} (internal id {check_key_id}) is already associated with node {existing_node_id_by_keyid} in this graph."
+                    f"DGraphNodeKey {key} (internal id {check_key_id}) is "
+                    f"already associated with node {existing_node_id_by_keyid} "
+                    f"in this graph."
                 )
             elif existing_node_id_by_keyid is not None:  # Index inconsistent
                 if check_key_id in self._key_id_to_node_id:
@@ -567,7 +564,8 @@ class DGraph:
             internal_id=node_id,
             kind=kind,
             key_internal_id=key_id,
-            application_key=app_key
+            application_key=app_key,
+            sort_rank=key.sort_rank
         )
 
         # --- Constraint Check ---
@@ -577,7 +575,8 @@ class DGraph:
         except Exception as e:
             if VERBOSE:
                 print(
-                    f"Constraint check failed for adding node via key {key} (app_key: {app_key}): {e}"
+                    f"Constraint check failed for adding node via key {key} "
+                    f"(app_key: {app_key}): {e}"
                 )
             raise
 
@@ -972,7 +971,14 @@ class DGraphWrap:
             return True
         else:
             return False
-
+        
+    def get_forward(self, kind: DGraphNodeKind, sorted: bool = False) -> \
+        Iterator[DGraphNodeKey]:
+        """
+        Get all nodes of a given kind that can be reached from the current node.
+        """
+        pass
+    
     # Add other convenience methods as needed...
     # e.g., remove_node_by_key(key), add_keyless_node(kind) etc.
 
@@ -980,7 +986,7 @@ class DGraphWrap:
 # --- Key Definition ---
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(eq=False, order=False)
 class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
     """Base class for keys associated with DGraph nodes.
     Subclasses must implement kind, constraints, and application_key properties.
@@ -1001,9 +1007,31 @@ class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
 
     @property
     def application_key(self) -> Optional[ApplicationKeyBase]:
-        """Returns the application-specific key/data object associated with this node, if any."""
+        """Returns the application-specific key/data object associated with this node, 
+        if any."""
         return None
+    
+    @property
+    def sort_rank(self) -> float:
+        """Returns the traversal order of the node if sorted=True is applied."""
+        return 1.0
 
     def __deepcopy__(self, memo: Dict[int, Any]) -> "DGraphNodeKey":
         # Keys are immutable and potentially shared, return self.
         return self
+
+    def __hash__(self) -> int:
+        return id(self)
+    
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+    
+    def __ne__(self, other: Any) -> bool:
+        return self is not other
+
+    
+    
+    
+    
+
+

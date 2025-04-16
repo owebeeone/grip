@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 import unittest
 from grip.grip_dgraph import ApplicationKeyBase, DGraphGroup, DGraph, DGraphWrap, DGraphNodeKind
-from grip.grip_graph4 import GroupKey, ProducerKey, ConsumerKey, QueryKey, ConstraintViolationError
+
+from grip.grip_graph import ConstraintViolationError, GroupKey, ProducerKey, ConsumerKey, QueryKey
 
 
 @dataclass(frozen=True, order=True)
@@ -9,6 +10,71 @@ class TestAppKey(ApplicationKeyBase):
     """Application key for testing."""
 
     app_key: tuple[str, str]
+    
+    @property
+    def name(self) -> str:
+        return f"TestAppKey{id(self)}"
+    
+    def __hash__(self) -> int:
+        return id(self)
+
+@dataclass
+class TestGroupKey(GroupKey):
+    """Group key for testing."""
+
+    name: str    
+    
+    def __eq__(self, other: object) -> bool:
+        return self is other
+    
+    def __hash__(self) -> int:
+        return id(self)
+
+@dataclass
+class TestProducerKey(ProducerKey):
+    """Producer key for testing."""
+
+    name: str
+    app_key: TestAppKey    
+    
+    @property
+    def application_key(self) -> TestAppKey:
+        return self.app_key
+    
+    def __eq__(self, other: object) -> bool:
+        return self is other
+    
+    def __hash__(self) -> int:
+        return id(self)
+    
+@dataclass
+class TestConsumerKey(ConsumerKey):
+    """Consumer key for testing."""
+
+    name: str
+    app_key: TestAppKey    
+    
+    @property
+    def application_key(self) -> TestAppKey:
+        return self.app_key
+    
+    def __eq__(self, other: object) -> bool:
+        return self is other
+    
+    def __hash__(self) -> int:
+        return id(self)
+    
+@dataclass
+class TestQueryKey(QueryKey):
+    """Query key for testing."""
+
+    name: str    
+    
+    def __eq__(self, other: object) -> bool:
+        return self is other
+    
+    def __hash__(self) -> int:
+        return id(self)
 
 
 # --- Unit Test Class for DGraph Constraints Interaction ---
@@ -24,11 +90,11 @@ class TestDGraphConstraints(unittest.TestCase):
         self.app_key_4 = TestAppKey(("G4", "A4"))
 
         # Create keys of different types using grip_graph4 keys
-        self.key_g1 = GroupKey("G1")
-        self.key_g2 = GroupKey("G2")
-        self.key_p1 = ProducerKey(("G1", "P1"), self.app_key)
-        self.key_c1 = ConsumerKey(("G1", "C1"), self.app_key_2)
-        self.key_q1 = QueryKey("Q1_specific")
+        self.key_g1 = TestGroupKey("G1")
+        self.key_g2 = TestGroupKey("G2")
+        self.key_p1 = TestProducerKey(("G1", "P1"), self.app_key)
+        self.key_c1 = TestConsumerKey(("G1", "C1"), self.app_key_2)
+        self.key_q1 = TestQueryKey("Q1_specific")
 
         # Add nodes corresponding to these keys
         self.node_g1 = self.wrap.get_or_add(self.key_g1)
@@ -102,8 +168,8 @@ class TestDGraphConstraints(unittest.TestCase):
         app_key_unique = TestAppKey(("Hello", "World"))
 
         # Keys for Producers/Consumers sharing the same app key
-        key_p_unique_1 = ProducerKey("P_unique_1", app_key_unique)
-        key_p_unique_2 = ProducerKey("P_unique_2", app_key_unique)  # Different key, same app_key
+        key_p_unique_1 = TestProducerKey("P_unique_1", app_key_unique)
+        key_p_unique_2 = TestProducerKey("P_unique_2", app_key_unique)  # Different key, same app_key
         # key_c_unique_1 = ConsumerKey("C_unique_1", app_key_unique) # See note below
 
         # Add corresponding nodes

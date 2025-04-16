@@ -31,6 +31,8 @@ class GripContextBuilder:
         """Add a new tap to the context."""
         self.taps[name] = tap
         return self
+    
+
 
 @datatree
 class GripContext:
