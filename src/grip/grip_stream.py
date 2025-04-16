@@ -344,6 +344,8 @@ class GripStreamMux(Generic[DType]):
                         # --- End Mux lock --- 
 
                         self.queue.task_done() 
+                        if streams_to_process_now is None:
+                            continue
                         
                         # --- Process the retrieved set of streams --- 
                         # (No Mux lock needed here, uses stream locks)

@@ -1,13 +1,7 @@
 from dataclasses import InitVar
-# from datatrees import datatree, dtfield # Commented out dependency
+from datatrees import datatree, dtfield
 from typing import Any
-import weakref
-from grip.dripfeeder import Drip, DripFeeder, DripImpl, new_controlled_drip
-from grip.grip_core import GripRegistry, GripRegistry
-import asyncio
-import pytest
-# from grip.dripfeeder import PushDripFeeder, ConstantDripFeeder # Commented out dependency
-import sys
+from grip.grip_key import GripRegistry, GripKey
 
 
 @datatree
@@ -16,6 +10,27 @@ class GripContextSnapshot:
     values: dict[GripRegistry, Any]
     source: 'GripContext'
 
+class GripContextBuilder:
+    
+    grip_registry: GripRegistry
+    scopes: dict[str, 'TapScope']
+    requests: dict[str, set[GripKey]]
+    taps: dict[str, 'Tap']
+    
+    def add_scope(self, scope: 'TapScope') -> 'GripContextBuilder':
+        """Add a new scope to the context."""
+        self.scope = scope
+        return self
+    
+    def add_request(self, name, keys: set[GripKey]) -> 'GripContextBuilder':
+        """Add a new request to the context.""" 
+        self.requests[name] = keys
+        return self
+
+    def add_tap(self, name, tap: 'Tap') -> 'GripContextBuilder':
+        """Add a new tap to the context."""
+        self.taps[name] = tap
+        return self
 
 @datatree
 class GripContext:
@@ -23,7 +38,8 @@ class GripContext:
     A context is a hierarchical mapping of GripKeys to DripFeeders.
     Contexts can inherit from a parent and override keys.
     """
-    grip: GripRegistry
+    grip_registry: GripRegistry
+    grok_runtime: 'GrokRuntime'
     # keys_requested: InitVar[list[GripKey] | None] = dtfield(default=None) # Commented out
     keys_requested: InitVar[list[GripRegistry] | None] = None # Replaced with simple default
     # parent: 'GripContext | None' = dtfield(default=None) # Commented out
