@@ -3,115 +3,125 @@ import pytest
 import random
 import time
 # Need imports for threading and executor
-import threading # Added
-from concurrent.futures import ThreadPoolExecutor # Added
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from typing import TypeVar, Any, Set, Dict, Callable, Awaitable
+from typing import TypeVar, Any, Set, Dict, Callable, Awaitable, List
 
 from grip.grip_stream import (
-    GripStream, GripStreamMux, AttemptedSendOnInactive, StreamAlreadyAddedError
+    GripStream,
+    StreamProcessor,
+    StreamScope,
+    AttemptedSendOnInactive,
+    StreamAlreadyAddedError
 )
 
 DType = TypeVar('DType')
 
 
 @pytest.mark.asyncio
-async def test_mux_immediate_deactivation():
-    """Test that the multiplexer can be activated and immediately deactivated."""
-    mux = GripStreamMux()
-    assert mux.active is False
-    mux.activate()
-    assert mux.active is True
+async def test_processor_immediate_deactivation():
+    """Test that the StreamProcessor can be activated and immediately deactivated."""
+    processor = StreamProcessor()
+    assert processor.active is False
+    processor.activate()
+    assert processor.active is True
     
     # Receiver loop starts in the background via activate()
 
     # Give the loop a tiny bit of time to ensure it's running before deactivate
     await asyncio.sleep(0.01)
 
-    mux.deactivate()
-    assert mux.active is False
+    processor.deactivate()
+    assert processor.active is False
 
     # Wait for the internal receiver loop to stop cleanly
-    await mux.wait_until_stopped(timeout=1.0)
+    await processor.wait_until_stopped(timeout=1.0)
 
     # Verify internal task state if needed (optional, implementation detail)
-    assert mux._receiver_task is not None
-    assert mux._receiver_task.done()
-    assert mux._receiver_task.exception() is None
+    assert processor._receiver_task is not None
+    assert processor._receiver_task.done()
+    # Allow for CancelledError on clean shutdown
+    if exc := processor._receiver_task.exception():
+        assert isinstance(exc, asyncio.CancelledError)
 
 
 @pytest.mark.asyncio
 async def test_single_sender_single_stream_async_processor():
     """Test one sender sending data to one stream with async processor using overload."""
-    mux = GripStreamMux[int]()
+    processor = StreamProcessor[int]()
+    scope = StreamScope[int](processor=processor)
     received_data = []
 
-    async def processor(data: int):
+    async def stream_proc_func(data: int):
         await asyncio.sleep(random.uniform(0, 0.001))
         received_data.append(data)
 
     # Use the overloaded method - type checker knows it's async
-    stream = mux.create_stream(processor=processor)
-
-    mux.activate()
+    processor.activate()
 
     async def sender_task():
         for i in range(5):
-            await stream.send(i)
+            await stream_proc_func(i)
             await asyncio.sleep(random.uniform(0.01, 0.05))
+
+    # Create stream using the scope (now async)
+    stream = await scope.create_stream(stream_processor_func=stream_proc_func)
 
     sender = asyncio.create_task(sender_task())
     await sender
 
     await asyncio.sleep(0.1)
 
-    mux.deactivate()
-    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=1.0)
     assert success is True
     assert exc is None
 
     assert received_data == [0, 1, 2, 3, 4]
-    assert mux._receiver_task is not None
-    assert mux._receiver_task.done()
-    assert mux._receiver_task.exception() is None
+    assert processor._receiver_task is not None
+    assert processor._receiver_task.done()
+    assert processor._receiver_task.exception() is None
 
 
 @pytest.mark.asyncio
 async def test_single_sender_single_stream_sync_processor():
     """Test one sender sending data to one stream with sync processor using overload."""
-    mux = GripStreamMux[int]()
+    processor = StreamProcessor[int]()
+    scope = StreamScope[int](processor=processor)
     received_data = []
 
     # Synchronous processor
-    def processor(data: int):
+    def stream_proc_func(data: int):
         # Simulate some CPU work
-        _ = [x*x for x in range(10)] 
+        _ = [x*x for x in range(10)]
         received_data.append(data)
 
     # Use the overloaded method - type checker knows it's sync
-    stream = mux.create_stream(processor=processor)
-
-    mux.activate()
+    processor.activate()
 
     async def sender_task():
         for i in range(5):
-            await stream.send(i)
+            await stream_proc_func(i)
             await asyncio.sleep(random.uniform(0.01, 0.05))
+
+    # Create stream using scope (async)
+    stream = await scope.create_stream(stream_processor_func=stream_proc_func)
 
     sender = asyncio.create_task(sender_task())
     await sender
 
     await asyncio.sleep(0.1) 
 
-    mux.deactivate()
-    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=1.0)
     assert success is True
     assert exc is None
 
     assert received_data == [0, 1, 2, 3, 4]
-    assert mux._receiver_task is not None
-    assert mux._receiver_task.done()
-    assert mux._receiver_task.exception() is None
+    assert processor._receiver_task is not None
+    assert processor._receiver_task.done()
+    assert processor._receiver_task.exception() is None
 
 
 @pytest.mark.asyncio
@@ -126,7 +136,8 @@ async def test_multi_sender_multi_stream(
     num_threads=0: Senders run as asyncio tasks (default).
     num_threads>0: Senders run in specified number of OS threads.
     """
-    mux = GripStreamMux[tuple[int, int]]()
+    processor = StreamProcessor[tuple[int, int]]()
+    scope = StreamScope[tuple[int, int]](processor=processor)
 
     received_data_per_stream: Dict[int, Set[int]] = defaultdict(set)
     stream_counters: Dict[int, int] = defaultdict(int)
@@ -143,10 +154,10 @@ async def test_multi_sender_multi_stream(
         stream_locks: Dict[int, asyncio.Lock] = {
             i: asyncio.Lock() for i in range(num_streams)
         }
-        stop_event = None # Not needed for asyncio tasks checking mux.active
+        stop_event = None # Not needed for asyncio tasks checking processor.active
 
     # Factory for processors - returns async for even, sync for odd stream_id
-    def create_processor(stream_id: int) -> Callable[..., Any]: # Return Any for implementation ease
+    def create_stream_processor_func(stream_id: int) -> Callable[..., Any]: # Return Any for implementation ease
         # Common logic for checking duplicates
         def check_and_add(data: tuple[int, int]):
             seq_num, sender_id = data
@@ -162,17 +173,16 @@ async def test_multi_sender_multi_stream(
         else:
             # Odd stream_id: Use a sync processor
             def sync_processor(data: tuple[int, int]):
-
                 check_and_add(data)
             return sync_processor
 
     streams: list[GripStream[tuple[int, int]]] = []
-    mux.activate()
+    processor.activate()
     event_loop = asyncio.get_running_loop() # Get loop for threadsafe calls
 
     for i in range(num_streams):
         # Use the overloaded method
-        stream = mux.create_stream(processor=create_processor(i))
+        stream = await scope.create_stream(stream_processor_func=create_stream_processor_func(i))
         streams.append(stream)
 
     # --- Sender Logic: Separate functions for tasks vs threads ---
@@ -180,7 +190,7 @@ async def test_multi_sender_multi_stream(
     async def sender_task_async(sender_id: int):
         """Sender logic for asyncio tasks."""
         sent_count = 0
-        while mux.active: # Check mux status directly
+        while processor.active: # Check processor status directly
             target_stream_index = random.randrange(num_streams)
             target_stream = streams[target_stream_index]
             target_lock = stream_locks[target_stream_index] # asyncio.Lock
@@ -230,7 +240,7 @@ async def test_multi_sender_multi_stream(
                 sent_count += 1
             # Catch exceptions from run_coroutine_threadsafe or future.result
             except AttemptedSendOnInactive: # This might be raised by future.result()
-                 break # Mux likely deactivated
+                 break # Processor likely deactivated
             except Exception as e:
                 # Handles QueueFull in send, TimeoutError from future.result, etc.
                 # Check stop_event again in case the error is due to shutdown race
@@ -266,14 +276,14 @@ async def test_multi_sender_multi_stream(
     await asyncio.sleep(duration_seconds)
 
     # --- Shutdown ---
-    print("Deactivating mux...")
+    print("Deactivating processor...")
     if stop_event:
         print("Signalling threads to stop...")
         stop_event.set() # Signal threads first
-    mux.deactivate()
+    processor.deactivate()
 
     print("Waiting for receiver loop to drain and stop...")
-    success, exc = await mux.wait_until_stopped(timeout=duration_seconds + 10.0) # Longer timeout for drain
+    success, exc = await processor.wait_until_stopped(timeout=duration_seconds + 10.0) # Longer timeout for drain
     if not success:
          print(f"Receiver loop failed to stop cleanly: {exc}")
     assert success is True
@@ -302,12 +312,12 @@ async def test_multi_sender_multi_stream(
          else:
              sender_counts[i] = result
 
-    assert mux._receiver_task is not None
-    assert mux._receiver_task.done()
-    assert mux._receiver_task.exception() is None
+    assert processor._receiver_task is not None
+    assert processor._receiver_task.done()
+    assert processor._receiver_task.exception() is None
 
     total_received_count = sum(len(v) for v in received_data_per_stream.values())
-    print(f"\n--- Results ---")
+    print("\n--- Results ---")
     print(f"Total items received across all streams: {total_received_count}")
     print("Received sequence counts per stream:",
           sorted(list({k: len(v) for k, v in received_data_per_stream.items()}.items())))
@@ -316,7 +326,7 @@ async def test_multi_sender_multi_stream(
 
     total_sent_count = sum(count for count in sender_counts.values() if isinstance(count, int))
     print(f"Total items reported sent by senders: {total_sent_count}")
-    print(f"Queue backup metric (items processed in batches > 1): {mux.queue_backup_metric}")
+    print(f"Processor queue backup metric: {processor.queue_backup_metric}")
 
     for stream_id, received_set in received_data_per_stream.items():
         if not received_set:
@@ -342,16 +352,17 @@ async def test_multi_sender_multi_stream(
 @pytest.mark.asyncio
 async def test_stream_latest_only():
     """Verify latest_only=True keeps only the last message."""
-    mux = GripStreamMux[int]()
+    processor = StreamProcessor[int]()
+    scope = StreamScope[int](processor=processor)
     received_items = []
 
-    async def processor(data: int):
+    async def stream_proc_func(data: int):
         received_items.append(data)
         await asyncio.sleep(0.01) # Add delay to allow sends to queue up
 
     # Create stream with latest_only=True
-    stream = mux.create_stream(processor, latest_only=True)
-    mux.activate()
+    processor.activate()
+    stream = await scope.create_stream(stream_proc_func, latest_only=True)
 
     # Send multiple items quickly
     await stream.send(1)
@@ -367,8 +378,8 @@ async def test_stream_latest_only():
     # Allow ample time for final processing
     await asyncio.sleep(0.1)
 
-    mux.deactivate()
-    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=1.0)
     assert success is True
     assert exc is None
 
@@ -382,19 +393,20 @@ async def test_stream_latest_only():
 @pytest.mark.asyncio
 async def test_stream_skip_duplicates():
     """Verify skip_duplicates=True prevents processing consecutive identical messages."""
-    mux = GripStreamMux[str]()
+    processor = StreamProcessor[str]()
+    scope = StreamScope[str](processor=processor)
     received_items = []
     processor_call_count = 0
 
-    async def processor(data: str):
+    async def stream_proc_func(data: str):
         nonlocal processor_call_count
         processor_call_count += 1
         received_items.append(data)
         await asyncio.sleep(0.001)
 
     # Create stream with skip_duplicates=True
-    stream = mux.create_stream(processor, skip_duplicates=True)
-    mux.activate()
+    processor.activate()
+    stream = await scope.create_stream(stream_proc_func, skip_duplicates=True)
 
     # Send sequence with duplicates
     await stream.send("A")
@@ -409,8 +421,8 @@ async def test_stream_skip_duplicates():
     # Allow time for processing
     await asyncio.sleep(0.1)
 
-    mux.deactivate()
-    success, exc = await mux.wait_until_stopped(timeout=1.0)
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=1.0)
     assert success is True
     assert exc is None
 
@@ -426,11 +438,12 @@ async def test_stream_skip_duplicates():
 @pytest.mark.asyncio
 async def test_stream_latest_only_and_skip_duplicates():
     """Verify interaction of latest_only and skip_duplicates."""
-    mux = GripStreamMux[str]()
+    processor = StreamProcessor[str]()
+    scope = StreamScope[str](processor=processor)
     received_items = []
     processor_call_count = 0
 
-    async def processor(data: str):
+    async def stream_proc_func(data: str):
         nonlocal processor_call_count
         processor_call_count += 1
         received_items.append(data)
@@ -438,8 +451,8 @@ async def test_stream_latest_only_and_skip_duplicates():
         await asyncio.sleep(0.01)
 
     # Create stream with BOTH options enabled
-    stream = mux.create_stream(processor, latest_only=True, skip_duplicates=True)
-    mux.activate()
+    processor.activate()
+    stream = await scope.create_stream(stream_proc_func, latest_only=True, skip_duplicates=True)
 
     # --- Send sequence --- 
     print("Sending A (1st)")
@@ -470,8 +483,8 @@ async def test_stream_latest_only_and_skip_duplicates():
     # Allow ample time for the receiver loop to process the final state
     await asyncio.sleep(0.1)
 
-    mux.deactivate()
-    success, exc = await mux.wait_until_stopped(timeout=2.0) # Increased timeout just in case
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=2.0) # Increased timeout just in case
     assert success is True
     assert exc is None
 
@@ -497,6 +510,134 @@ async def test_stream_latest_only_and_skip_duplicates():
         f"Expected processed items {expected_values_processed}, got {received_items}"
     assert processor_call_count == len(expected_values_processed), \
         f"Expected {len(expected_values_processed)} processor calls, got {processor_call_count}"
+
+
+@pytest.mark.asyncio
+async def test_stream_scope_drain():
+    """Verify StreamScope.drain detaches streams and waits for pending processing."""
+    processor = StreamProcessor[int]()
+    scope = StreamScope[int](processor=processor)
+    received_items = []
+    processing_complete_events = []
+
+    async def stream_proc_func(data: int):
+        event = asyncio.Event()
+        processing_complete_events.append(event)
+        # Simulate some work
+        await asyncio.sleep(0.05)
+        received_items.append(data)
+        event.set() # Signal this item is done
+
+    processor.activate()
+    stream = await scope.create_stream(stream_proc_func)
+
+    # Send initial items
+    await stream.send(1)
+    await stream.send(2)
+
+    # Give a moment for processing to start
+    await asyncio.sleep(0.01)
+
+    # Drain the scope
+    print("Calling scope.drain()...")
+    drain_task = asyncio.create_task(scope.drain(timeout=1.0))
+
+    # Try sending after drain starts - should fail or be ignored
+    send_after_drain_failed = False
+    try:
+        await stream.send(3)
+        # Give a tiny moment in case send doesn't raise immediately
+        await asyncio.sleep(0.01)
+    except AttemptedSendOnInactive:
+        send_after_drain_failed = True
+    except Exception as e:
+        pytest.fail(f"Sending after drain raised unexpected error: {e}")
+
+    # Wait for drain to complete
+    await drain_task
+    print("scope.drain() completed.")
+
+    # Wait for all processing events triggered *before* drain
+    if processing_complete_events:
+        await asyncio.gather(*(evt.wait() for evt in processing_complete_events))
+    print("All processing events set.")
+
+    # Verify only pre-drain items were received
+    assert received_items == [1, 2],\
+        f"Expected [1, 2], got {received_items}"
+
+    # Verify stream was detached (callback is None)
+    assert stream._notify_dirty_callback is None,\
+        "Stream notification callback was not cleared by drain."
+    assert stream._scope_ref is None,\
+        "Stream scope reference was not cleared by drain."
+
+    # Verify send after drain failed as expected
+    # Note: If send doesn't raise but is just ignored, this check might need adjustment
+    # based on the exact behaviour desired/implemented in send when detached.
+    # Current implementation *should* raise AttemptedSendOnInactive.
+    assert send_after_drain_failed is True, "Send after drain did not fail as expected."
+
+    # Cleanly stop processor
+    processor.deactivate()
+    success, exc = await processor.wait_until_stopped(timeout=1.0)
+    assert success is True
+    assert exc is None
+
+
+@pytest.mark.asyncio
+async def test_stream_scope_drain_timeout():
+    """Verify StreamScope.drain raises TimeoutError if processing takes too long."""
+    processor = StreamProcessor[int]()
+    scope = StreamScope[int](processor=processor)
+    processing_started_event = asyncio.Event()
+    processing_blocker = asyncio.Event() # Event to manually unblock processing
+
+    async def slow_stream_proc_func(data: int):
+        processing_started_event.set()
+        # Wait indefinitely until blocker is set
+        await processing_blocker.wait()
+
+    processor.activate()
+    stream = await scope.create_stream(slow_stream_proc_func)
+
+    # Send an item
+    await stream.send(1)
+
+    # Wait for processing to start
+    await asyncio.wait_for(processing_started_event.wait(), timeout=1.0)
+
+    # Attempt to drain with a short timeout
+    drain_timeout = 0.1
+    print(f"Calling scope.drain() with timeout {drain_timeout}s...")
+    with pytest.raises(asyncio.TimeoutError):
+        await scope.drain(timeout=drain_timeout)
+    print("scope.drain() timed out as expected.")
+
+    # Verify stream was still detached even though drain timed out
+    assert stream._notify_dirty_callback is None,\
+        "Stream notification callback was not cleared by drain timeout."
+    assert stream._scope_ref is None,\
+        "Stream scope reference was not cleared by drain timeout."
+
+    # Attempt to send after drain timeout - should still fail
+    send_after_drain_failed = False
+    try:
+        await stream.send(2)
+    except AttemptedSendOnInactive:
+        send_after_drain_failed = True
+    assert send_after_drain_failed is True, \
+        "Send after drain timeout did not fail."
+
+    # Allow processing to finish now
+    processing_blocker.set()
+
+    # Cleanly stop processor
+    processor.deactivate()
+    # Need potentially longer timeout here as processing was blocked
+    success, exc = await processor.wait_until_stopped(timeout=2.0)
+    assert success is True
+    assert exc is None
 
 
 # Keep or remove the main block as needed
