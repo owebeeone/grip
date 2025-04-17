@@ -1006,6 +1006,7 @@ class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
         pass
 
     @property
+    @abstractmethod
     def application_key(self) -> Optional[ApplicationKeyBase]:
         """Returns the application-specific key/data object associated with this node, 
         if any."""

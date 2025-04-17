@@ -306,10 +306,17 @@ class GraphNodeAccessor(DGraphNodeKey, ABC):
         """
         Get all nodes of a given kind that can be reached from the current node.
         """
-        
 
 @dataclass
-class GroupKey(DGraphNodeKey):
+class GraphNodeBase(DGraphNodeKey):
+    """
+    A GraphNodeBase is a base class for all GraphNodes.
+    """
+    pass
+
+
+@dataclass
+class GroupKey(GraphNodeBase):
     """Key representing a GROUP node within GripGraph4."""
 
     @property
@@ -322,7 +329,7 @@ class GroupKey(DGraphNodeKey):
 
 
 @dataclass
-class ProducerKey(DGraphNodeKey):
+class ProducerKey(GraphNodeBase):
     """Key representing a PRODUCER node within GripGraph4."""
 
     @property
@@ -336,7 +343,7 @@ class ProducerKey(DGraphNodeKey):
 
 
 @dataclass
-class ConsumerKey(DGraphNodeKey):
+class ConsumerKey(GraphNodeBase):
     """Key representing a CONSUMER node within GripGraph4."""
 
     @property
@@ -349,7 +356,7 @@ class ConsumerKey(DGraphNodeKey):
 
 
 @dataclass
-class QueryKey(DGraphNodeKey):
+class QueryKey(GraphNodeBase):
     """Key representing a QUERY node within GripGraph4."""
 
     @property

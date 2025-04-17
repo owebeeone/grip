@@ -1,5 +1,3 @@
-
-
 from typing import Any, Optional
 from grip.grip_dgraph import ApplicationKeyBase
 from grip.grip_graph import ProducerKey, ConsumerKey, QueryKey
@@ -11,14 +9,6 @@ from grip.grip_stream import GripStream
 
 class GripContext: pass
 
-
-class DripMessage:
-    """
-    A Message is a message from a GripDripFeeder to a GripDrip.
-    """
-    grip: GripKey
-    data: Any
-    
 
 
 
