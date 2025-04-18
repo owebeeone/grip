@@ -1,3 +1,4 @@
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Optional
 from grip.grip_dgraph import ApplicationKeyBase
 from grip.grip_graph import ProducerKey, ConsumerKey, QueryKey
@@ -11,18 +12,22 @@ class GripContext: pass
 
 
 
-
+@dataclass
 class GripDrip(ConsumerKey):
     """
     A GripDrip is a controlled drip.
     """
     
-    grip: GripKey
+    grip: InitVar[GripKey]
+    grips: set[GripKey] = field(init=False)
     grok: GrokRuntime
     context: GripContext
     streams: set[GripStream]
     
-    def application_key(self) -> GripKey:
+    def __post_init__(self, grip: GripKey):
+        self.grips = {grip}
+    
+    def application_keys(self) -> GripKey:
         """Returns the GripKey for this Drip."""
         return self.grip
     

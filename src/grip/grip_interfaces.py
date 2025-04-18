@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import copy
+from dataclasses import InitVar, field
 from datatrees import datatree, dtfield
 from abc import ABC, abstractmethod
 from typing import Any, Iterator
@@ -142,7 +143,7 @@ class DripStreamScope(StreamScope[DripBatch | DripMessage]):
     pass
 
 
-@datatree
+@datatree(eq=False, order=False)
 class DripStream(GripStream[DripBatch | DripMessage]):
     """
     A DripStream is a stream for a Drip.
@@ -169,14 +170,18 @@ class GripDrip(ABC, ConsumerKey):
     A Drip is a drip for a GripKey.
     """
     
-    grip: GripKeyBase
+    grip: InitVar[GripKeyBase]
+    grips: set[GripKeyBase] = field(init=False)
     _client_streams: set[DripStream] = dtfield(default_factory=set, repr=False)
     _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, repr=False)
     
+    def __post_init__(self, grip: GripKeyBase):
+        self.grips = {grip}
+    
+    # Drip is allowed to have excatly one application key.
     @property
-    def application_key(self) -> GripKeyBase:
-        return self.grip
-
+    def application_keys(self) -> set[GripKeyBase]:
+        return self.grips
     
     @abstractmethod
     async def register_stream(self, client_stream: DripStream) -> None:

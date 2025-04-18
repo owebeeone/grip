@@ -22,7 +22,7 @@ class TestAppKey(ApplicationKeyBase):
 class TestGroupKey(GroupKey):
     """Group key for testing."""
 
-    name: str    
+    name: str
     
     def __eq__(self, other: object) -> bool:
         return self is other
@@ -35,10 +35,10 @@ class TestProducerKey(ProducerKey):
     """Producer key for testing."""
 
     name: str
-    app_key: TestAppKey    
+    app_key: set[TestAppKey]    
     
     @property
-    def application_key(self) -> TestAppKey:
+    def application_keys(self) -> set[TestAppKey]:
         return self.app_key
     
     def __eq__(self, other: object) -> bool:
@@ -55,8 +55,8 @@ class TestConsumerKey(ConsumerKey):
     app_key: TestAppKey    
     
     @property
-    def application_key(self) -> TestAppKey:
-        return self.app_key
+    def application_keys(self) -> set[TestAppKey]:
+        return {self.app_key}
     
     def __eq__(self, other: object) -> bool:
         return self is other
@@ -92,7 +92,7 @@ class TestDGraphConstraints(unittest.TestCase):
         # Create keys of different types using grip_graph4 keys
         self.key_g1 = TestGroupKey("G1")
         self.key_g2 = TestGroupKey("G2")
-        self.key_p1 = TestProducerKey(("G1", "P1"), self.app_key)
+        self.key_p1 = TestProducerKey(("G1", "P1"), {self.app_key, self.app_key_2})
         self.key_c1 = TestConsumerKey(("G1", "C1"), self.app_key_2)
         self.key_q1 = TestQueryKey("Q1_specific")
 
@@ -168,8 +168,8 @@ class TestDGraphConstraints(unittest.TestCase):
         app_key_unique = TestAppKey(("Hello", "World"))
 
         # Keys for Producers/Consumers sharing the same app key
-        key_p_unique_1 = TestProducerKey("P_unique_1", app_key_unique)
-        key_p_unique_2 = TestProducerKey("P_unique_2", app_key_unique)  # Different key, same app_key
+        key_p_unique_1 = TestProducerKey("P_unique_1", {app_key_unique})
+        key_p_unique_2 = TestProducerKey("P_unique_2", {app_key_unique})  # Different key, same app_key
         # key_c_unique_1 = ConsumerKey("C_unique_1", app_key_unique) # See note below
 
         # Add corresponding nodes
@@ -190,6 +190,13 @@ class TestDGraphConstraints(unittest.TestCase):
         self.assertEqual(
             self.node_g1.context_resource_index[expected_index_key_p], node_p_unique_1.internal_id
         )
+        # Check the resource index is removed when the node is removed
+        self.wrap.disconnect_nodes(key_p_unique_1, self.key_g1)
+        self.assertNotIn(expected_index_key_p, self.node_g1.context_resource_index)
+        
+        # Add it again.
+        self.wrap.connect_nodes(key_p_unique_1, self.key_g1)
+        self.assertIn(expected_index_key_p, self.node_g1.context_resource_index)
 
         # 2. Try connecting second producer P_unique_2 (same app_key) -> G1
         # Group G1's check_can_receive_connection_from should fail

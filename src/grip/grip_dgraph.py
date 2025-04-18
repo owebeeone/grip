@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional, Any, Dict, Set, List, Type, Iterable, Tuple
 from enum import Enum, auto
 from collections import deque  # For BFS algorithm
+from collections.abc import Iterable as IterableABC # Import Iterable
 import copy  # Import the copy module
 from abc import ABC, abstractmethod  # For abstract base class
 
@@ -139,7 +140,7 @@ class DGraphNodeConstraints(ABC):
     def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check if the given node can be added to the graph.
         Called by DGraph.add_node before adding the node to the main dictionary.
-        The node_to_add object contains the application_key already assigned.
+        The node_to_add object contains the application_keys already assigned.
         Implementations should raise ConstraintViolationError if the node cannot be added
         (e.g., due to application key uniqueness violation).
         """
@@ -295,11 +296,11 @@ class DGraphNode(DGraphNodeBase):
     internal_id: int
     kind: DGraphNodeKind  # Kind is now determined by the key used to create it
     # Field to store the associated application-level key/data object
-    application_key: Optional[ApplicationKeyBase] = field(compare=False)
+    application_keys: Optional[Set[ApplicationKeyBase]] = field(compare=False)
     sort_rank: float = 1.0  # Used to sort nodes when traversing within a kind
     key_internal_id: int = -1  # -1 indicates no key associated (or key was reaped)
     # NEW: Index stored *on* context nodes (Groups/Queries)
-    context_resource_index: Optional[Dict[Tuple[ApplicationKeyBase, DGraphNodeKind], int]] = field(
+    context_resource_index: Optional[Dict[Tuple[set[ApplicationKeyBase], DGraphNodeKind], int]] = field(
         default=None, compare=False, repr=False
     )
     forward_links_by_kind: list[Set[int]] = field(default=None, compare=False)
@@ -421,16 +422,19 @@ class DGraphNode(DGraphNodeBase):
 
     def __repr__(self):
         key_info = f", key_id={self.key_internal_id}" if self.key_internal_id != -1 else ""
-        app_key_info = (
-            f", app_key={type(self.application_key).__name__}" if self.application_key else ""
-        )
+        app_keys = self.application_keys
+        app_key_str = ", ".join(
+            sorted(set(type(k).__name__ for k in app_keys))
+        ) if isinstance(app_keys, IterableABC) else repr(app_keys)
+        app_key_info = f", app_key={app_key_str}"
         context_index_info = (
             f", index_size={len(self.context_resource_index)}"
             if self.context_resource_index is not None
             else ""
         )
         return (
-            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}{key_info}{app_key_info}{context_index_info})"
+            f"DGraphNode(id={self.internal_id}, kind={self.kind.name}"
+            f"{key_info}{app_key_info}{context_index_info})"
         )
 
     def __hash__(self):
@@ -538,7 +542,7 @@ class DGraph:
         initializes context index if needed, adds node, updates key_id index,
         and calls post-add hook.
         """
-        app_key = key.application_key
+        app_keys = key.application_keys
         kind = key.kind
 
         # --- DGraphNodeKey Uniqueness Check (via DGraphGroup internal ID) ---
@@ -564,7 +568,7 @@ class DGraph:
             internal_id=node_id,
             kind=kind,
             key_internal_id=key_id,
-            application_key=app_key,
+            application_keys=app_keys,
             sort_rank=key.sort_rank
         )
 
@@ -576,7 +580,7 @@ class DGraph:
             if VERBOSE:
                 print(
                     f"Constraint check failed for adding node via key {key} "
-                    f"(app_key: {app_key}): {e}"
+                    f"(app_key: {app_keys}): {e}"
                 )
             raise
 
@@ -989,8 +993,8 @@ class DGraphWrap:
 @dataclass(eq=False, order=False)
 class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
     """Base class for keys associated with DGraph nodes.
-    Subclasses must implement kind, constraints, and application_key properties.
-    They must also be hashable and comparable, likely based on their application_key.
+    Subclasses must implement kind, constraints, and application_keys properties.
+    They must also be hashable and comparable, likely based on their application_keys.
     """
 
     @property
@@ -1007,8 +1011,8 @@ class DGraphNodeKey(ABC):  # Make it an Abstract Base Class
 
     @property
     @abstractmethod
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        """Returns the application-specific key/data object associated with this node, 
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        """Returns the application-specific keys/data objects associated with this node, 
         if any."""
         return None
     

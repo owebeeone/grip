@@ -37,14 +37,40 @@ class NoOpConstraints(DGraphNodeConstraints):
 _no_op_constraints = NoOpConstraints()
 
 # --- Define Dummy App Key for Testing --- #
-@dataclass(frozen=True, order=True)
+@dataclass(eq=False, order=False)
 class TestAppKey(ApplicationKeyBase):
     id: Any
+    
+    @property
+    def name(self) -> str:
+        return "TestAppKey-{self.id!r}"
+    
+    def __hash__(self) -> int:
+        return id(self)
+    
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+    
+    def __ne__(self, other: Any) -> bool:
+        return self is not other
 
 # --- Specific Key Subclasses for Grip Graph ---
 
-@dataclass(frozen=True, order=True)
-class GroupKey(DGraphNodeKey):
+@dataclass
+class TestAppKeyBase(DGraphNodeKey):
+    
+    def __hash__(self) -> int:
+        return id(self)
+    
+    def __eq__(self, other: Any) -> bool:
+        return self is other
+
+    def __ne__(self, other: Any) -> bool:
+        return self is not other
+
+
+@dataclass(eq=False, order=False)
+class GroupKey(TestAppKeyBase):
     """Key representing a GROUP node."""
     app_key: TestAppKey
     @property
@@ -54,11 +80,11 @@ class GroupKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _no_op_constraints
     @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return None
 
-@dataclass(frozen=True, order=True)
-class ProducerKey(DGraphNodeKey):
+@dataclass(eq=False, order=False)
+class ProducerKey(TestAppKeyBase):
     """Key representing a PRODUCER node."""
     app_key: TestAppKey
     @property
@@ -68,11 +94,11 @@ class ProducerKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _no_op_constraints
     @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return {self.app_key} if self.app_key is not None else None
 
-@dataclass(frozen=True, order=True)
-class ConsumerKey(DGraphNodeKey):
+@dataclass(eq=False, order=False)
+class ConsumerKey(TestAppKeyBase):
     """Key representing a CONSUMER node."""
     app_key: TestAppKey
     @property
@@ -82,11 +108,11 @@ class ConsumerKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _no_op_constraints
     @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return {self.app_key} if self.app_key is not None else None
     
-@dataclass(frozen=True, order=True)
-class QueryKey(DGraphNodeKey):
+@dataclass(eq=False, order=False)
+class QueryKey(TestAppKeyBase):
     """Key representing a QUERY node."""
     app_key: TestAppKey
     @property
@@ -96,8 +122,8 @@ class QueryKey(DGraphNodeKey):
     def constraints(self) -> DGraphNodeConstraints:
         return _no_op_constraints
     @property
-    def application_key(self) -> Optional[ApplicationKeyBase]:
-        return self.app_key
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return None
 
 
 
@@ -154,10 +180,10 @@ def create_random_graph(
         # Create unique key data
         key_data = f"Key_{kind.name}_{i}_{seed}"
         if kind == DGraphNodeKind.GROUP:
-            key = GroupKey(TestAppKey(key_data))
+            key = GroupKey(None)
         elif kind == DGraphNodeKind.PRODUCER:
             key = ProducerKey(TestAppKey(key_data))
-        else:  # Consumer
+        else:
             key = ConsumerKey(TestAppKey(key_data))
 
         node = wrap.get_or_add(key)  # Uses the key to determine kind

@@ -42,13 +42,14 @@ import inspect
 from datatrees import datatree
 from datatrees.datatrees import dtfield
 from grip.grip_base import GripBaseException
-from typing import TYPE_CHECKING # Added for forward references
+from typing import TYPE_CHECKING  # Added for forward references
 
 
 class AttemptedSendOnInactive(GripBaseException):
     """
     An exception raised when an attempt is made to send data on an inactive multiplexer.
     """
+
 
 # AttemptedAddStreamToInactive might not be strictly needed if adding is allowed while inactive,
 # but kept for potential future use or stricter policy.
@@ -57,15 +58,18 @@ class AttemptedAddStreamToInactive(GripBaseException):
     An exception raised when an attempt is made to add a stream to an inactive multiplexer.
     """
 
+
 class StreamAlreadyAddedError(GripBaseException):
     """
     An exception raised when attempting to add a stream that is already associated with a multiplexer.
     """
 
+
 class UnexpectedMessageReceived(GripBaseException):
     """
     An exception raised when an unexpected message is received in the mux queue.
     """
+
 
 DType = TypeVar("DType")
 _SENTINEL = object()  # Sentinel value to signal queue shutdown
@@ -73,9 +77,13 @@ _DIRTY_STREAMS = object()
 
 if TYPE_CHECKING:
     # Add forward references for renamed/new classes
-    class StreamProcessor(Generic[DType]): pass
+    class StreamProcessor(Generic[DType]):
+        pass
+
     # Add StreamScope back
-    class StreamScope(Generic[DType]): pass
+    class StreamScope(Generic[DType]):
+        pass
+
 
 @datatree(eq=False)
 class GripStream(Generic[DType]):
@@ -84,9 +92,12 @@ class GripStream(Generic[DType]):
     Buffers data internally and notifies via callback.
     Processor MUST be awaitable.
     """
+
     # Callback now points to StreamScope._notify_processor_of_dirty_stream
-    _notify_dirty_callback: Optional[Callable[['GripStream[DType]'], Awaitable[None]]] = dtfield(default=None, init=False, repr=False)
-    _scope_ref: Optional['StreamScope[DType]'] = dtfield(default=None, init=False, repr=False)
+    _notify_dirty_callback: Optional[Callable[["GripStream[DType]"], Awaitable[None]]] = dtfield(
+        default=None, init=False, repr=False
+    )
+    _scope_ref: Optional["StreamScope[DType]"] = dtfield(default=None, init=False, repr=False)
 
     stream_processor_func: Callable[[DType], Awaitable[None]] = dtfield(default=None, repr=False)
     latest_only: bool = dtfield(default=False)
@@ -101,7 +112,7 @@ class GripStream(Generic[DType]):
         notify_callback = self._notify_dirty_callback
         # No longer need scope ref here, callback handles it
         if notify_callback is None:
-             raise AttemptedSendOnInactive("Stream is not attached to an active processor/scope.")
+            raise AttemptedSendOnInactive("Stream is not attached to an active processor/scope.")
 
         needs_notification = False
         update_buffer_and_notify = True
@@ -124,11 +135,6 @@ class GripStream(Generic[DType]):
             # Call the scope's notification method, passing self
             await notify_callback(self)
 
-    def __eq__(self, other: Any) -> bool:
-        return self is other
-
-    def __hash__(self) -> int:
-        return id(self)
 
 @datatree
 class StreamProcessor(Generic[DType]):
@@ -137,14 +143,19 @@ class StreamProcessor(Generic[DType]):
     Manages a dedicated task and queue to execute stream processor callbacks
     asynchronously. Stream management is delegated to StreamScope.
     """
-    receiver_loop_error_handler: Callable[[Exception], None] = dtfield(default=lambda msg: print(f"StreamProcessor Error: {msg!r}"))
+
+    receiver_loop_error_handler: Callable[[Exception], None] = dtfield(
+        default=lambda msg: print(f"StreamProcessor Error: {msg!r}")
+    )
     queue: asyncio.Queue[object] = dtfield(default_factory=asyncio.Queue)
     active: bool = dtfield(default=False)
     _receiver_task: Optional[asyncio.Task] = dtfield(default=None, init=False, repr=False)
     queue_backup_metric: int = dtfield(default=0, init=False)
     _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False)
     # Dirty set now stores tuples
-    _dirty_streams: Optional[Set[Tuple[GripStream[DType], 'StreamScope[DType]']]] = dtfield(default=None, init=False, repr=False)
+    _dirty_streams: Optional[Set[Tuple[GripStream[DType], "StreamScope[DType]"]]] = dtfield(
+        default=None, init=False, repr=False
+    )
 
     def activate(self):
         if self.active and self._receiver_task and not self._receiver_task.done():
@@ -170,12 +181,12 @@ class StreamProcessor(Generic[DType]):
             return True, None
         if self._receiver_task.done():
             try:
-                 exc = self._receiver_task.exception()
-                 return True, exc
+                exc = self._receiver_task.exception()
+                return True, exc
             except asyncio.CancelledError as e:
-                 return True, e
+                return True, e
             except Exception as e:
-                 return False, e
+                return False, e
         try:
             await asyncio.wait_for(asyncio.shield(self._receiver_task), timeout=timeout)
             exc = self._receiver_task.exception()
@@ -190,11 +201,15 @@ class StreamProcessor(Generic[DType]):
             print(f"Processor {id(self)} wait_until_stopped encountered unexpected error: {e}")
             return False, e
 
-    async def _add_dirty_stream(self, stream: GripStream[DType], scope: 'StreamScope[DType]') -> None:
+    async def _add_dirty_stream(
+        self, stream: GripStream[DType], scope: "StreamScope[DType]"
+    ) -> None:
         # This method is called by StreamScope after it updates its count
         if not self.active:
-             print(f"Warning: _add_dirty_stream called on inactive processor {id(self)} by scope {id(scope)}.")
-             return
+            print(
+                f"Warning: _add_dirty_stream called on inactive processor {id(self)} by scope {id(scope)}."
+            )
+            return
         put_marker = False
         async with self._lock:
             if self._dirty_streams is None:
@@ -205,13 +220,15 @@ class StreamProcessor(Generic[DType]):
             try:
                 self.queue.put_nowait(_DIRTY_STREAMS)
             except asyncio.QueueFull:
-                print(f"WARNING: StreamProcessor queue full when trying to notify _DIRTY_STREAMS.")
+                print("WARNING: StreamProcessor queue full when trying to notify _DIRTY_STREAMS.")
 
     async def _receive_loop(self):
         should_stop = False
         try:
             while not should_stop:
-                streams_to_process_now: Optional[Set[Tuple[GripStream[DType], StreamScope[DType]]]] = None
+                streams_to_process_now: Optional[
+                    Set[Tuple[GripStream[DType], StreamScope[DType]]]
+                ] = None
                 try:
                     msg = await self.queue.get()
                     if msg is _SENTINEL:
@@ -242,8 +259,15 @@ class StreamProcessor(Generic[DType]):
                         continue
 
                     for source_stream, source_scope in streams_to_process_now:
-                        if not isinstance(source_stream, GripStream) or not isinstance(source_scope, StreamScope):
-                            self.receiver_loop_error_handler(TypeError(f"Invalid item in dirty set tuple: {(source_stream, source_scope)}"))
+                        if not isinstance(source_stream, GripStream) or not isinstance(
+                            source_scope, StreamScope
+                        ):
+                            self.receiver_loop_error_handler(
+                                TypeError(
+                                    "Invalid item in dirty set tuple: "
+                                    f"{(source_stream, source_scope)}"
+                                )
+                            )
                             continue
 
                         buffer_to_process: Optional[List[DType]] = None
@@ -261,7 +285,7 @@ class StreamProcessor(Generic[DType]):
                                         self.queue_backup_metric += batch_size - 1
                                     for data_item in buffer_to_process:
                                         await source_stream.stream_processor_func(data_item)
-                                        processed_item_count += 1 # Increment only if processor ran
+                                        processed_item_count += 1  # Increment only if processor ran
                                 except Exception as e:
                                     self.receiver_loop_error_handler(e)
                         finally:
@@ -272,7 +296,11 @@ class StreamProcessor(Generic[DType]):
                                 except Exception as ack_err:
                                     # Log error during acknowledgement
                                     self.receiver_loop_error_handler(
-                                        RuntimeError(f"Error acknowledging scope {id(source_scope)} for stream {id(source_stream)}: {ack_err!r}")
+                                        RuntimeError(
+                                            "Error acknowledging scope "
+                                            f"{id(source_scope)} for stream "
+                                            f"{id(source_stream)}: {ack_err!r}"
+                                        )
                                     )
 
                     # Check stop condition after processing batch
@@ -290,7 +318,9 @@ class StreamProcessor(Generic[DType]):
         finally:
             self.active = False
 
+
 # --- StreamScope Class (Implement Drain Logic) ---
+
 
 @datatree(eq=False)
 class StreamScope(Generic[DType]):
@@ -298,32 +328,46 @@ class StreamScope(Generic[DType]):
     Manages a logical group of GripStreams and associates them
     with a specific StreamProcessor, including a drain mechanism.
     """
-    processor: 'StreamProcessor[DType]'
-    _streams: Set[GripStream[DType]] = dtfield(default_factory=set, init=False, repr=False)
-    _lock: asyncio.Lock = dtfield(default_factory=asyncio.Lock, init=False, repr=False) # Protects _streams and count/event
+
+    processor: "StreamProcessor[DType]"
+    _streams: Set[GripStream[DType]] = dtfield(
+        default_factory=set, init=False, repr=False)
+    _lock: asyncio.Lock = dtfield(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )  # Protects _streams and count/event
     _pending_processing_count: int = dtfield(default=0, init=False, repr=False)
-    _drain_event: asyncio.Event = dtfield(default_factory=asyncio.Event, init=False, repr=False)
+    _drain_event: asyncio.Event = dtfield(
+        default_factory=asyncio.Event, init=False, repr=False)
 
     def __post_init__(self):
         """Initializes the drain event to indicate initially drained state."""
-        self._drain_event.set() # Start drained
+        self._drain_event.set()  # Start drained
 
     # --- Stream Creation / Management moved here ---
     @overload
     async def create_stream(
-        self, stream_processor_func: Callable[[DType], Awaitable[None]], *,
-        latest_only: bool = False, skip_duplicates: bool = False
+        self,
+        stream_processor_func: Callable[[DType], Awaitable[None]],
+        *,
+        latest_only: bool = False,
+        skip_duplicates: bool = False,
     ) -> GripStream[DType]: ...
 
     @overload
     async def create_stream(
-        self, stream_processor_func: Callable[[DType], None], *,
-        latest_only: bool = False, skip_duplicates: bool = False
+        self,
+        stream_processor_func: Callable[[DType], None],
+        *,
+        latest_only: bool = False,
+        skip_duplicates: bool = False,
     ) -> GripStream[DType]: ...
 
     async def create_stream(
-        self, stream_processor_func: Callable[..., Any], *,
-        latest_only: bool = False, skip_duplicates: bool = False
+        self,
+        stream_processor_func: Callable[..., Any],
+        *,
+        latest_only: bool = False,
+        skip_duplicates: bool = False,
     ) -> GripStream[DType]:
         """
         Factory method to create a new GripStream, associate it with this scope,
@@ -331,25 +375,29 @@ class StreamScope(Generic[DType]):
         This method is ASYNCHRONOUS.
         """
         if not self.processor.active:
-            raise AttemptedSendOnInactive(f"Cannot create stream: StreamProcessor {id(self.processor)} is not active.")
+            raise AttemptedSendOnInactive(
+                f"Cannot create stream: StreamProcessor {id(self.processor)} is not active."
+            )
 
         final_processor_func: Callable[[DType], Awaitable[None]]
         if inspect.iscoroutinefunction(stream_processor_func):
             final_processor_func = stream_processor_func
         else:
+
             async def async_wrapper(data: DType):
                 try:
-                     stream_processor_func(data)
+                    stream_processor_func(data)
                 except Exception as e:
-                     print(f"Error in sync processor wrapper: {e}")
-                     raise
+                    print(f"Error in sync processor wrapper: {e}")
+                    raise
                 await asyncio.sleep(0)
+
             final_processor_func = async_wrapper
 
         new_stream = GripStream[DType](
             stream_processor_func=final_processor_func,
             latest_only=latest_only,
-            skip_duplicates=skip_duplicates
+            skip_duplicates=skip_duplicates,
         )
         # Add asynchronously, handling lock
         await self.add_stream(new_stream)
@@ -358,20 +406,26 @@ class StreamScope(Generic[DType]):
     # add_stream sets the NEW notification callback
     async def add_stream(self, stream: GripStream[DType]):
         if not self.processor.active:
-            raise AttemptedSendOnInactive(f"Cannot add stream: StreamProcessor {id(self.processor)} is not active.")
+            raise AttemptedSendOnInactive(
+                f"Cannot add stream: StreamProcessor {id(self.processor)} is not active."
+            )
         if stream._notify_dirty_callback is not None:
-             raise StreamAlreadyAddedError(f"Stream {id(stream)} already has a notification callback.")
+            raise StreamAlreadyAddedError(
+                f"Stream {id(stream)} already has a notification callback."
+            )
 
         async with self._lock:
-             if stream._notify_dirty_callback is not None:
-                  raise StreamAlreadyAddedError(f"Stream {id(stream)} already has a notification callback (race condition).")
-             if stream in self._streams:
-                  return # Already added
+            if stream._notify_dirty_callback is not None:
+                raise StreamAlreadyAddedError(
+                    f"Stream {id(stream)} already has a notification callback (race condition)."
+                )
+            if stream in self._streams:
+                return  # Already added
 
-             stream._scope_ref = self
-             # Set callback to the scope's method which handles count/event
-             stream._notify_dirty_callback = self._notify_processor_of_dirty_stream
-             self._streams.add(stream)
+            stream._scope_ref = self
+            # Set callback to the scope's method which handles count/event
+            stream._notify_dirty_callback = self._notify_processor_of_dirty_stream
+            self._streams.add(stream)
 
     # remove_stream clears the callback
     async def remove_stream(self, stream: GripStream[DType]):
@@ -382,12 +436,12 @@ class StreamScope(Generic[DType]):
         async with self._lock:
             if stream in self._streams:
                 stream._scope_ref = None
-                stream._notify_dirty_callback = None # Clear scope callback
+                stream._notify_dirty_callback = None  # Clear scope callback
                 self._streams.remove(stream)
                 # Note: Processor might still process one last notification
                 # if removal happens just after send(). The check in receive_loop handles this.
 
-    # --- Drain Methods Implemented --- 
+    # --- Drain Methods Implemented ---
 
     async def _notify_processor_of_dirty_stream(self, stream: GripStream[DType]):
         """Internal callback from GripStream.send(). Increments count and notifies processor."""
@@ -410,20 +464,24 @@ class StreamScope(Generic[DType]):
                 await self.processor._add_dirty_stream(stream, self)
             except AttemptedSendOnInactive:
                 # Processor became inactive between check and call. Revert count.
-                print(f"Warning: Processor {id(self.processor)} deactivated during dirty registration for stream {id(stream)}.")
+                print(
+                    f"Warning: Processor {id(self.processor)} deactivated during dirty registration for stream {id(stream)}."
+                )
                 async with self._lock:
-                    if stream in self._streams: # Check again before decrementing
+                    if stream in self._streams:  # Check again before decrementing
                         self._pending_processing_count -= 1
                         if self._pending_processing_count == 0:
                             self._drain_event.set()
             except Exception as reg_err:
-                 print(f"ERROR: Failed registering dirty stream {id(stream)} with processor: {reg_err!r}")
-                 # Revert count if registration fails
-                 async with self._lock:
-                     if stream in self._streams: # Check again
-                         self._pending_processing_count -= 1
-                         if self._pending_processing_count == 0:
-                             self._drain_event.set()
+                print(
+                    f"ERROR: Failed registering dirty stream {id(stream)} with processor: {reg_err!r}"
+                )
+                # Revert count if registration fails
+                async with self._lock:
+                    if stream in self._streams:  # Check again
+                        self._pending_processing_count -= 1
+                        if self._pending_processing_count == 0:
+                            self._drain_event.set()
 
     async def _acknowledge_processing(self, stream: GripStream[DType]):
         """
@@ -438,7 +496,9 @@ class StreamScope(Generic[DType]):
                         self._drain_event.set()
                 else:
                     # This indicates a logic error (e.g., ack without notification)
-                    print(f"WARNING: Scope {id(self)} received unexpected processing acknowledgement for stream {id(stream)}; count already zero.")
+                    print(
+                        f"WARNING: Scope {id(self)} received unexpected processing acknowledgement for stream {id(stream)}; count already zero."
+                    )
             # else: If stream was removed after processing started but before ack, ignore.
 
     async def drain(self, timeout: Optional[float] = None):
@@ -452,9 +512,9 @@ class StreamScope(Generic[DType]):
         async with self._lock:
             streams_to_deactivate = set(self._streams)
             for stream in streams_to_deactivate:
-                stream._notify_dirty_callback = None # Prevent future sends via this scope
+                stream._notify_dirty_callback = None  # Prevent future sends via this scope
                 stream._scope_ref = None
-            self._streams.clear() # Clear the scope's own list
+            self._streams.clear()  # Clear the scope's own list
 
         # Now wait for pending operations (initiated before deactivation) to complete
         if self._pending_processing_count == 0 and self._drain_event.is_set():
@@ -467,7 +527,10 @@ class StreamScope(Generic[DType]):
             # However, the processor might still be decrementing the count via _acknowledge_processing.
             # Reading it without lock is slightly racy but acceptable for error message.
             pending_count = self._pending_processing_count
-            print(f"WARNING: Drain timed out for scope {id(self)} after {timeout}s. Still pending: {pending_count}")
+            print(
+                f"WARNING: Drain timed out for scope {id(self)} "
+                f"after {timeout}s. Still pending: {pending_count}"
+            )
             raise
 
     def __eq__(self, other: Any) -> bool:

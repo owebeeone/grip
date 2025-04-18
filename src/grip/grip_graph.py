@@ -94,8 +94,8 @@ class ConsumerConstraints(BaseGripConstraints):
 
     def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check: Consumer nodes must have an application key."""
-        if node_to_add.application_key is None:
-            raise ConstraintViolationError("Consumer nodes must have an application key")
+        if not node_to_add.application_keys or len(node_to_add.application_keys) != 1:
+            raise ConstraintViolationError("Consumer nodes must have only one application key")
         # Uniqueness check within context will be added later if needed
 
 
@@ -114,29 +114,10 @@ class ProducerConstraints(BaseGripConstraints):
 
     def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check: Producer nodes must have an application key."""
-        if node_to_add.application_key is None:
-            raise ConstraintViolationError("Producer nodes must have an application key")
+        if not node_to_add.application_keys:
+            raise ConstraintViolationError(
+                "Producer nodes must have at least one application key")
         # Uniqueness check within context will be added later if needed
-
-    def post_add_node(self, graph: "DGraph", added_node: "DGraphNode"):
-        """Post-add: Update the parent context index."""
-        app_key = added_node.application_key
-        kind = added_node.kind
-        if app_key is None:
-            return  # Should have been caught by check_add_node
-
-        parent_context_id: Optional[int] = None
-        # TODO: Robustly determine parent context ID from added_node or app_key
-        if hasattr(app_key, "context_id"):
-            parent_context_id = app_key.context_id
-
-        if parent_context_id is not None:
-            parent_node = graph.nodes.get(parent_context_id)
-            if parent_node and parent_node.context_resource_index is not None:
-                index_key = (app_key, kind)
-                parent_node.context_resource_index[index_key] = added_node.internal_id
-                graph._mark_dirty(parent_context_id)  # Mark parent dirty
-            # else: Log warning?
 
 
 # Singleton instance
@@ -154,9 +135,9 @@ class GroupQueryConstraints(BaseGripConstraints):
 
         # Check uniqueness for Producers/Consumers within this Group's context
         if source_node.kind in (DGraphNodeKind.PRODUCER, DGraphNodeKind.CONSUMER):
-            app_key = source_node.application_key
+            app_keys = source_node.application_keys
             kind = source_node.kind
-            if app_key is None:
+            if app_keys is None:
                 # This should be prevented by Producer/Consumer check_add_node, but check again
                 raise ConstraintViolationError(
                     f"{kind.name} node {source_node.internal_id} must have an application key to "
@@ -170,14 +151,21 @@ class GroupQueryConstraints(BaseGripConstraints):
                     f"Group node {target_node.internal_id} has no context_resource_index initialized."
                 )
 
-            index_key = (app_key, kind)
-            existing_node_id = target_node.context_resource_index.get(index_key)
+            index_keys = set([(app_key, kind) for app_key in app_keys])
+            existing_node_ids = [target_node.context_resource_index.get(index_key)
+                                 for index_key in index_keys]
+            existing_node_ids = [
+                node_id 
+                for node_id in existing_node_ids 
+                if node_id is not None and node_id != source_node.internal_id]
 
-            if existing_node_id is not None and existing_node_id != source_node.internal_id:
+            if existing_node_ids:
                 # Found a *different* node with the same app_key/kind in this context
                 raise ConstraintViolationError(
-                    f"Context (Group {target_node.internal_id}) already has a {kind.name} registered "
-                    f"for ApplicationKey {app_key} (Node {existing_node_id}). Cannot connect Node "
+                    f"Context (Group {target_node.internal_id}) "
+                    f"already has a {kind.name} registered "
+                    f"for ApplicationKey {app_keys} (Node {existing_node_ids}). "
+                    "Cannot connect Node "
                     f"{source_node.internal_id}."
                 )
             # If existing_node_id is None or matches source_node.internal_id, connection is allowed.
@@ -188,12 +176,14 @@ class GroupQueryConstraints(BaseGripConstraints):
         # Add Producer/Consumer to the context index
         if source_node.kind in (DGraphNodeKind.PRODUCER, DGraphNodeKind.CONSUMER):
 
-            app_key = source_node.application_key
+            app_keys = source_node.application_keys
+            assert app_keys, "Source node must have at least one application key"
             kind = source_node.kind
-            assert app_key is not None
-            index_key = (app_key, kind)
-            # Update the index - check_can_receive handled conflicts
-            target_node.context_resource_index[index_key] = source_node.internal_id
+            context_resource_index = target_node.context_resource_index
+            assert context_resource_index is not None, "Target node must have a context resource index"
+            for app_key in app_keys:
+                index_key = (app_key, kind)
+                context_resource_index[index_key] = source_node.internal_id
 
     def post_remove_connection_from(self, source_node: "DGraphNode", target_node: "DGraphNode"):
         """Remove entry from Group's context index after connection FROM source is removed."""
@@ -204,16 +194,18 @@ class GroupQueryConstraints(BaseGripConstraints):
             if target_node.context_resource_index is None:
                 return  # Should exist
 
-            index_key = (source_node.application_key, source_node.kind)
+            index_keys = set([(app_key, source_node.kind) 
+                              for app_key in source_node.application_keys])
             # Remove if it maps to the disconnecting source node
-            if target_node.context_resource_index.get(index_key) != source_node.internal_id:
-                raise RuntimeError(
-                    f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
-                )
-            if target_node.context_resource_index.pop(index_key, None) is None:
-                raise RuntimeError(
-                    f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
-                )
+            for index_key in index_keys:
+                if target_node.context_resource_index.get(index_key) != source_node.internal_id:
+                    raise RuntimeError(
+                        f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+                    )
+                if target_node.context_resource_index.pop(index_key, None) is None:
+                    raise RuntimeError(
+                        f"Group node {target_node.internal_id} has inconsistent mapping for {index_key}."
+                    )
 
 
 class GroupConstraints(GroupQueryConstraints):
@@ -226,7 +218,7 @@ class GroupConstraints(GroupQueryConstraints):
 
     def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check: Group nodes must NOT have an application key."""
-        if node_to_add.application_key is not None:
+        if node_to_add.application_keys is not None:
             raise ConstraintViolationError("Context/Group nodes must not have an application key")
 
     def post_add_node(self, graph: "DGraph", added_node: "DGraphNode"):
@@ -250,7 +242,7 @@ class QueryConstraints(GroupQueryConstraints):
 
     def check_add_node(self, graph: "DGraph", node_to_add: "DGraphNode"):
         """Check: Query nodes must NOT have an application key."""
-        if node_to_add.application_key is not None:
+        if node_to_add.application_keys:
             raise ConstraintViolationError("Query nodes must not have an application key")
 
     def post_add_node(self, graph: "DGraph", added_node: "DGraphNode"):
@@ -312,8 +304,6 @@ class GraphNodeBase(DGraphNodeKey):
     """
     A GraphNodeBase is a base class for all GraphNodes.
     """
-    pass
-
 
 @dataclass
 class GroupKey(GraphNodeBase):
@@ -326,6 +316,10 @@ class GroupKey(GraphNodeBase):
     @property
     def constraints(self) -> DGraphNodeConstraints:
         return _group_constraints
+    
+    @property
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return None
 
 
 @dataclass
@@ -366,6 +360,10 @@ class QueryKey(GraphNodeBase):
     @property
     def constraints(self) -> DGraphNodeConstraints:
         return _query_constraints
+    
+    @property
+    def application_keys(self) -> Optional[set[ApplicationKeyBase]]:
+        return None
 
 
 # --- Constraint Logic ---
