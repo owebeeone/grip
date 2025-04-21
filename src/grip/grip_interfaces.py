@@ -10,6 +10,16 @@ from typing import Any, Iterator
 from grip.grip_graph import ConsumerKey, GroupKey, ProducerKey, ApplicationKeyBase
 from grip.grip_stream import GripStream, StreamProcessor, StreamScope
 
+
+@datatree
+class GripKeySpec:
+    """Internal spec for a GripKey containing its type and default value."""
+    data_type: type | None = None
+    default: Any = None
+    
+    def __deepcopy__(self, memo: dict) -> 'GripKeySpec':
+        return self
+
 class GripKeyBase(ABC, ApplicationKeyBase):
  
     @property
@@ -19,12 +29,12 @@ class GripKeyBase(ABC, ApplicationKeyBase):
     
     @property
     @abstractmethod
-    def grip(self) -> 'GripRegistry':
+    def registry(self) -> 'GripRegistry':
         pass
     
     @property
     @abstractmethod
-    def spec(self) -> '_GripKeySpec':
+    def spec(self) -> 'GripKeySpec':
         pass
     
     @property
@@ -140,31 +150,28 @@ class DripStreamScope(StreamScope[DripBatch | DripMessage]):
     """
     A DripStreamScope is a stream scope for a DripStreamData.
     """
-    pass
 
 
-@datatree(eq=False, order=False)
+@datatree(eq=False)
 class DripStream(GripStream[DripBatch | DripMessage]):
     """
     A DripStream is a stream for a Drip.
     """
-    pass
 
-@datatree
+@datatree(eq=False)
 class DripStreamProcessor(StreamProcessor[DripBatch | DripMessage]):
     """
     A DripStreamProcessor is a stream processor for a DripStream.
     """
-    pass
 
-@datatree
+@datatree(eq=False)
 class GripDripFeeder(ABC, ProducerKey):
     """
     A DripFeeder is a dripfeeder for a GripKey.
     """
     pass
 
-@datatree
+@datatree(eq=False)
 class GripDrip(ABC, ConsumerKey):
     """
     A Drip is a drip for a GripKey.
@@ -192,7 +199,7 @@ class GripDrip(ABC, ConsumerKey):
             self._client_streams.add(client_stream)
 
 
-@datatree
+@datatree(eq=False)
 class GripDripContextConnection(ABC):
     """
     A GripDripContextConnection is a connection between a Drip and a DripFeeder
@@ -215,7 +222,7 @@ class GripDripContextConnection(ABC):
         pass
 
 
-@datatree
+@datatree(eq=False)
 class DripFeederConnection(ABC):
     """
     A DripFeederConnection is a connection occurs when a Drip connects to a DripFeeder
@@ -242,7 +249,7 @@ class DripFeederConnection(ABC):
 
 
 
-@datatree
+@datatree(eq=False)
 class GripTapConnectionHandler(ABC):
     """
     GripTapConnectionHandler is provided by the DripFeeder to receive connection
@@ -263,7 +270,7 @@ class GripTapConnectionHandler(ABC):
 
     
 
-@datatree
+@datatree(eq=False)
 class GripTapResources(ABC):
     """
     GripTapResources are the resources for a GripTap, this is specific to the
@@ -287,7 +294,7 @@ class GripTapResources(ABC):
         pass
 
 
-@datatree
+@datatree(eq=False)
 class GripTap(ABC):
     """
     GripConverterTap is a tap for a GripConverter.
@@ -334,7 +341,7 @@ class GripTap(ABC):
         """
         pass
 
-@datatree
+@datatree(eq=False)
 class GripTapConstant(ABC):
     """
     A constant tap for a set of grips.
@@ -363,7 +370,7 @@ class GripTapConstant(ABC):
         pass
     
     
-@datatree
+@datatree(eq=False)
 class GripTapMatchStateManager(ABC):
     """
     Manages a specific match state for a Matcher.
@@ -378,7 +385,7 @@ class GripTapMatchStateManager(ABC):
         pass
 
     
-@datatree
+@datatree(eq=False)
 class GripTapMatcher(ABC):
     """
     GripTapMatcher is a matcher for a GripTap.
@@ -399,7 +406,7 @@ class GripTapMatcher(ABC):
         pass
 
 
-@datatree
+@datatree(eq=False)
 class GripTapMatcherFactory(ABC):
     """
     Matchers inputs to select the correct tap to use.
@@ -413,7 +420,7 @@ class GripTapMatcherFactory(ABC):
         pass
 
 
-@datatree
+@datatree(eq=False)
 class GripTapScope(ABC):
     """
     GripTapScope is a scope for a GripTap.
@@ -426,7 +433,7 @@ class GripTapScope(ABC):
         """
         pass
 
-@datatree
+@datatree(eq=False)
 class GripContext(ABC):
     """
     GripContext is a wrapper around a subgraph of a GripGraph. The
@@ -450,7 +457,9 @@ class GripContext(ABC):
         active until the context is removed.
         """
         pass
-    
+
+
+@datatree(eq=False)
 class GripQueryContext(ABC, GripContext):
     """
     GripQueryContext is a context for a GripQuery.
@@ -484,14 +493,14 @@ class GripQueryContext(ABC, GripContext):
         pass
 
 
-@datatree
+@datatree(eq=False)
 class GripContextBuilder:
     """
     GripContextBuilder is a builder for GripContexts.
     """
     pass
 
-@datatree
+@datatree(eq=False)
 class GrokRuntimeBase:
     """
     GrokRuntime is the runtime for a Grok application.

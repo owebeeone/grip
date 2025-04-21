@@ -8,6 +8,7 @@ from grip.grip_base import DuplicateGripKey
 from grip.grip_graph import ApplicationKeyBase
 from grip.grip_interfaces import GripRegistry
 
+from grip.grip_interfaces import GripKeySpec, GripKeyBase
 
 @datatree
 class _GripKeySpec:
@@ -22,7 +23,7 @@ class _GripKeySpec:
 # GripKey is an identifier for a value managed by GRIP.
 # It is bound to a parent Grip and contains type/default spec.
 @datatree(frozen=True, init=False, slots=True)
-class GripKey(ApplicationKeyBase):
+class GripKey(GripKeyBase):
     """
     GripKey is an identifier for a value managed by GRIP.
     It is bound to a parent Grip and contains type/default spec.
