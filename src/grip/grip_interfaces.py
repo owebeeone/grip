@@ -7,7 +7,7 @@ from datatrees import datatree, dtfield
 from abc import ABC, abstractmethod
 from typing import Any, Iterator
 
-from grip.grip_graph import ConsumerKey, GroupKey, ProducerKey, ApplicationKeyBase
+from grip.grip_graph import ConsumerKey, GroupKey, ProducerKey, ApplicationKeyBase, GraphNodeBase
 from grip.grip_stream import GripStream, StreamProcessor, StreamScope
 
 
@@ -91,13 +91,6 @@ class GripRegistry(ABC):
         """
         pass
 
-
-@datatree
-class GripDGraphNodeBase(ABC):
-    """
-    GripDGraphNodeBase is a base class for all GripDGraphNodes.
-    """
-    pass
 
 
 @datatree
@@ -226,7 +219,8 @@ class GripDripContextConnection(ABC):
 class DripFeederConnection(ABC):
     """
     A DripFeederConnection is a connection occurs when a Drip connects to a DripFeeder
-    to inform the c.
+    to inform the connection handler of data from the source Node for the
+    requested grips.
     """
     drip_context_connection: GripDripContextConnection
     
@@ -509,7 +503,7 @@ class GrokRuntimeBase:
     
     @abstractmethod
     def log(self, 
-            origin_key: GripDGraphNodeBase, 
+            origin_key: GraphNodeBase, 
             msg: str = None, 
             exc: Exception = None,
             data: Any = None):
@@ -526,4 +520,83 @@ class GrokRuntimeBase:
         builder: GripContextBuilder,
         parents: list[GripContext]
         ) -> GripContext:
+        pass
+    
+    @abstractmethod
+    async def send_message(
+        self, 
+        message: DripMessage | DripBatch, 
+        key: ProducerKey | None = None, 
+        connection: GripDripContextConnection | None = None
+        ) -> None:
+        """
+        Send a message to consumers.
+        If producer key is provided, the message will be sent to all the listeners of
+        the producer key that have outstanding drips for the message grips.
+        
+        Alternatively, if a connection is provided, the message will be sent to the
+        connection group/context for that specific connection.
+        """
+        pass
+    
+    @abstractmethod
+    async def connect_groups(self, 
+                             from_group: GripGraphContextNode, 
+                             to_group: GripGraphContextNode) -> None:
+        """
+        This establishes a "depends" relationship between the two groups.
+        
+        When the from group is resolving for a grip producer, the to group
+        will be searched for a producer that satisfies the request.
+        
+        Visa-versa, if a producer in the to group is informing there is a new
+        producer for a grip, the from group will be searched for a consumer
+        that satisfies the request.
+        
+        The number of connections is unlimited but the resulting graph must
+        be acyclic.
+        
+        These conections are weak, meaning that they are not referenced by
+        the (usually) containing context, the garbage collector will reap
+        them and break the connections.
+        """
+        pass
+    
+    @abstractmethod
+    async def connect_consumer(
+        self, 
+        consumer: GripDrip, 
+        connection: GripGraphContextNode) -> None:
+        """
+        Establishes a connection between a consumer and a context node.
+        
+        This is used to inform the runtime that a consumer is interested in
+        data from a specific context node.
+        
+        The GROK will select the producer for the context node send the most
+        recent data to the consumer.
+
+        Note that this will be weakly referenced and may be garbage collected
+        unless the caller holds a reference to consumer.
+        """
+        pass
+    
+    
+    @abstractmethod
+    async def connect_producer(
+        self, 
+        producer: GripDripFeeder, 
+        connection: GripGraphContextNode) -> None:
+        """
+        Establishes a connection between a producer and a context node.
+        
+        This is used to inform the runtime that a producer is interested in
+        data from a specific context node.
+        
+        The GROK will select will establish a connection between the DripFeeder 
+        for and all "visible" Drips.
+
+        Note that this will be weakly referenced and may be garbage collected
+        unless the caller holds a reference to consumer.
+        """
         pass
