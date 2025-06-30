@@ -30,7 +30,7 @@ class GripKey(GripKeyBase):
     """
     _name: str
     _is_main: bool = True
-    _grip: 'GripRegistry' = dtfield(compare=False, repr=False, hash=False)
+    _grip_registry: 'GripRegistry' = dtfield(compare=False, repr=False, hash=False)
     _spec: _GripKeySpec = dtfield(
         default_factory=_GripKeySpec, compare=False, repr=False, hash=False)
     _alt: 'GripKey' = dtfield(compare=False, repr=False, hash=False)
@@ -48,37 +48,36 @@ class GripKey(GripKeyBase):
         Args:
             *args:
                 name: str
-                grip: Grip
+                grip_registry: GripRegistry
             **kwds:
                 _alt: GripKey
                 _name: str
-                _grip: Grip
+                _grip_registry: GripRegistry
                 
         From a comparison standpoint, a gripkey is only equal to itself since the id
         is different for each instance. When creating a new GripKey, using the a
         (name, grip) constructor, the pro key is automatically created.
         """
-        alt = kwds.get('_alt', None)
+        alt = kwds.pop('_alt', None)
         if alt is None:
             # Initialize with name and grip
             name = args[0] if len(args) > 0 else kwds['name']
-            grip = args[1] if len(args) > 1 else kwds['grip']
+            grip_registry = args[1] if len(args) > 1 else kwds['grip_registry']
             is_main = True
             spec = _GripKeySpec()
         else:
             # Initialize with a GripKey to make an alternative GripKey
             assert len(args) == 0, "Alternative GripKey initialization doesn't support args"
-            assert 'name' not in kwds, "Alternative GripKey initialization doesn't support name"
-            assert 'grip' not in kwds, "Alternative GripKey initialization doesn't support grip"
-            name = alt.name
-            grip = alt.grip
-            is_main = not alt.is_main
+            assert not kwds, f"Alternative GripKey has unexpected kwds: {kwds}"
+            name = alt._name
+            grip_registry = alt._grip_registry
+            is_main = not alt._is_main
             spec = alt.spec
         
         # Initialize the GripKey using object.__setattr__ because frozen dataclasses
         # don't support setting attributes any other way.
         object.__setattr__(self, '_name', name)
-        object.__setattr__(self, '_grip', grip)
+        object.__setattr__(self, '_grip_registry', grip_registry)
         object.__setattr__(self, '_is_main', is_main)
         object.__setattr__(self, '_spec', spec)
         object.__setattr__(self, '_id', self._new_id())
@@ -97,8 +96,8 @@ class GripKey(GripKeyBase):
         return self._name
     
     @property
-    def grip(self) -> GripRegistry:
-        return self._grip
+    def registry(self) -> GripRegistry:
+        return self._grip_registry
     
     @property
     def spec(self) -> _GripKeySpec:

@@ -20,7 +20,7 @@ class GripKeySpec:
     def __deepcopy__(self, memo: dict) -> 'GripKeySpec':
         return self
 
-class GripKeyBase(ABC, ApplicationKeyBase):
+class GripKeyBase(ApplicationKeyBase):
  
     @property
     @abstractmethod
@@ -158,14 +158,14 @@ class DripStreamProcessor(StreamProcessor[DripBatch | DripMessage]):
     """
 
 @datatree(eq=False)
-class GripDripFeeder(ABC, ProducerKey):
+class GripDripFeeder(ProducerKey):
     """
     A DripFeeder is a dripfeeder for a GripKey.
     """
     pass
 
 @datatree(eq=False)
-class GripDrip(ABC, ConsumerKey):
+class GripDrip(ConsumerKey):
     """
     A Drip is a drip for a GripKey.
     """
@@ -454,7 +454,7 @@ class GripContext(ABC):
 
 
 @datatree(eq=False)
-class GripQueryContext(ABC, GripContext):
+class GripQueryContext(GripContext):
     """
     GripQueryContext is a context for a GripQuery.
     

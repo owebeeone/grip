@@ -22,11 +22,6 @@ class Drip(ABC, Generic[T]):
         self._drip_id = cls._drip_id_counter
         cls._drip_id_counter += 1
 
-    """
-    A reactive value stream associated with a specific GripKey and context.
-    Delegates data flow to its current DripFeeder.
-    """
-
     @abstractmethod
     def snapshot(self) -> T:
         """

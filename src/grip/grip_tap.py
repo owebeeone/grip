@@ -124,8 +124,6 @@ class TapRestriction(Enum):
 @datatree
 class TapPair:
     """
-    A pair of TAPs that are used to send data to the consumer.
-    
     
     """
     tap_restriction: TapRestriction
@@ -320,7 +318,7 @@ class SimpleTap(Tap):
         self.active = True
         asyncio.create_task(self._input_data_listener())
         
-    def handle_input_future(self, fut: asyncio.Future[dict[GripKey, Any]]) -> None:
+    async def handle_input_future(self, fut: asyncio.Future[dict[GripKey, Any]]) -> None:
         try:
             input_data = await fut
         except asyncio.CancelledError:
@@ -328,7 +326,7 @@ class SimpleTap(Tap):
             logging.error(f"Input future cancelled")
             raise
         
-    def handle_control_future(self, fut: asyncio.Future[dict[GripKey, Any]]) -> None:
+    async def handle_control_future(self, fut: asyncio.Future[dict[GripKey, Any]]) -> None:
         try:
             control_data = await fut
         except asyncio.CancelledError:
@@ -347,9 +345,9 @@ class SimpleTap(Tap):
                 return_when=asyncio.FIRST_COMPLETED)
             for fut in done:
                 if TapInputStream.CONTROL == curr_futures.index(fut) + 1:
-                    self.handle_control_future(fut)
+                    await self.handle_control_future(fut)
                 elif TapInputStream.INPUT == curr_futures.index(fut) + 1:
-                    self.handle_input_future(fut)
+                    await self.handle_input_future(fut)
                     
     async def _send_output_data(self, output_data: dict[GripKey, Any]) -> None:
         """
@@ -605,7 +603,7 @@ class TapBuilder:
         
         return self
 
-
+@datatree
 class TapFactoryBuilder:
     """
     Builds a TapPair from a function.
@@ -619,13 +617,29 @@ class TapFactoryBuilder:
     def add_function(
         self, 
         output_grip: GripKey,
-        params: dict[GripKey, Any], 
+        params: set[GripKey], 
         function: Callable[..., Any]) -> 'TapFactoryBuilder':
-
-        factory = lambda: function
         
-        return self.tap_pair_node(
-            tap_pair=function)
+        class FunctionTap(Tap):
+            @property
+            def name(self) -> str:
+                return "FunctionTap"
+                
+            @property
+            def outputs(self) -> set[GripKey]:
+                return {output_grip}
+            
+            @property
+            def inputs(self) -> set[GripKey]:
+                return params
+
+            def input_data(self, input_data: dict[GripKey, Any]) -> None:
+                pass # TODO: Implement
+            
+            def output_data_future(self) -> asyncio.Future[dict[GripKey, Any]]:
+                pass # TODO: Implement
+            
+        return self.tap_pair_node(main=FunctionTap)
 
 # Builder for defining outputs for a Tap definition
 @datatree
@@ -637,7 +651,7 @@ class TapOutputBuilder:
     builder: TapBuilder
     tap_factory_builder: TapFactoryBuilder = dtfield(
         self_default=lambda s: TapFactoryBuilder(
-            grip_registry=s.get_grip_registry()),
+            tap_output_builder=s.builder),
         compare=False, repr=False, hash=False)
     
     def get_grip_registry(self) -> GripRegistry:
@@ -670,16 +684,21 @@ class TapOutputBuilder:
             if not callable(value_or_function):
                 # It's a static value
                 self.tap_factory_builder.add_const_function(output_grip=grip_key)
-                function = lambda: value_or_function
                 param_names = tuple()
             else:   
                 # It's a function
                 function = value_or_function
-                self.tap_factory_builder.add_function(output_grip=grip_key, function)
-
                 param_names = tuple(
                     inspect.signature(value_or_function).parameters.keys())
-            
+                params: set[GripKey] = set()
+                for param_name in param_names:
+                    grip_key = self.builder.get_grip(param_name)
+                    if grip_key is None:
+                        raise KeyError(f"GripKey '{param_name}' not found")
+                    params.add(grip_key)
+                self.tap_factory_builder.add_function(
+                    output_grip=grip_key, params=params, function=function)
+
             params = set(
                 self.builder.get_grip(p) for p in param_names)
                 

@@ -62,7 +62,7 @@ class GripRegistryImpl(GripRegistry):
             if name in self.grip_registry._keys:
                 raise DuplicateGripKey(f"GripKey '{name}' already defined")
 
-            key = GripKey(name=name, grip=self.grip_registry)
+            key = GripKey(name=name, grip_registry=self.grip_registry)
             self.grip_registry._keys[name] = key
 
             def definer(default: Any = None, data_type: Optional[type] = None):
@@ -114,7 +114,7 @@ class GripRegistryImpl(GripRegistry):
 
             key = self.grip._keys.get(name)
             if key is None:
-                key = GripKey(name=name, grip=self.grip)
+                key = GripKey(name=name, grip_registry=self.grip)
                 self.grip._keys[name] = key
             return key
 
